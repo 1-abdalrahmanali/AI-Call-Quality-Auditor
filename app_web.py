@@ -1,686 +1,828 @@
-import sqlite3
-import pandas as pd
+"""
+QA Operations Console
+----------------------------------------------------------------------
+Workflow-first dashboard for QA managers and team leads: find an agent,
+open their calls, review AI-generated audit reports. No analytics/chart
+widgets by design — the job of this page is navigation, not reporting.
+
+Routing note: Streamlit has no built-in path-based routing (no real
+/agent/{id} URLs). This app approximates it with query-string state
+(?view=AgentDetails&agent_id=...), which is bookmarkable/shareable in
+a browser, but will show as localhost:8501/?view=... rather than a
+clean /agent/... path. True path routing would need Streamlit's
+multipage-app file structure or a third-party router package.
+"""
+
 import json
 import os
-from datetime import datetime, date, timedelta
+import sqlite3
+from datetime import datetime, timedelta
+
+import pandas as pd
 import streamlit as st
 from openai import OpenAI
 
 # ==========================================
-# 1. CONFIGURATION
+# 1. CONFIGURATION & SETUP
 # ==========================================
-SERVER_GROQ_KEY = "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"
+try:
+    SERVER_GROQ_KEY = st.secrets.get("GROQ_API_KEY", "")
+except Exception:
+    SERVER_GROQ_KEY = ""
+SERVER_GROQ_KEY = SERVER_GROQ_KEY or os.environ.get("GROQ_API_KEY", "")
+
 DB_FILE = "enterprise_qa.db"
 BANNED_WORDS_FILE = "banned_words.json"
-LOGIN_PASSWORD = "Abdalrahman2026"
 
-st.set_page_config(page_title="Enterprise QA Console", page_icon="🎧", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="QA Operations Console",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 # ==========================================
-# 2. DATABASE
+# 2. DATABASE HELPERS
 # ==========================================
+def get_conn():
+    return sqlite3.connect(DB_FILE)
+
+
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS agents (
-                    id TEXT PRIMARY KEY, name TEXT, team TEXT, email TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS calls (
+    c.execute("""CREATE TABLE IF NOT EXISTS agents (
+                    id TEXT PRIMARY KEY, name TEXT, team TEXT, email TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS calls (
                     id TEXT PRIMARY KEY, agent_id TEXT, date TEXT, duration TEXT,
                     audio_file TEXT, transcription TEXT, qa_score REAL, grammar_score REAL,
                     status TEXT, profanity_detected INTEGER,
-                    FOREIGN KEY(agent_id) REFERENCES agents(id))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS reports (
+                    FOREIGN KEY(agent_id) REFERENCES agents(id))""")
+    c.execute("""CREATE TABLE IF NOT EXISTS reports (
                     call_id TEXT PRIMARY KEY, language TEXT, summary TEXT,
                     violations TEXT, grammar_feedback TEXT, manager_notes TEXT,
-                    FOREIGN KEY(call_id) REFERENCES calls(id))''')
+                    FOREIGN KEY(call_id) REFERENCES calls(id))""")
     conn.commit()
     conn.close()
+
 
 init_db()
 
+
 def run_query(query, params=()):
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query(query, conn, params=params)
-    conn.close()
-    return df
+    conn = get_conn()
+    try:
+        return pd.read_sql_query(query, conn, params=params)
+    finally:
+        conn.close()
+
 
 def execute_query(query, params=()):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(query, params)
-    conn.commit()
-    conn.close()
-
-# ==========================================
-# 3. BANNED WORDS (used by the auditor + editable in Settings)
-# ==========================================
-def load_banned_words():
-    if os.path.exists(BANNED_WORDS_FILE):
-        try:
-            with open(BANNED_WORDS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"english_banned": [], "spanish_banned": [], "english_offensive": [], "spanish_offensive": []}
-
-def save_banned_words(data):
-    with open(BANNED_WORDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-# ==========================================
-# 4. SMALL HELPERS
-# ==========================================
-def format_dt(raw, fmt="%b %d, %Y \u00b7 %I:%M %p"):
-    if not raw:
-        return "\u2014"
+    conn = get_conn()
     try:
-        return datetime.fromisoformat(raw).strftime(fmt)
-    except Exception:
-        return raw
+        c = conn.cursor()
+        c.execute(query, params)
+        conn.commit()
+    finally:
+        conn.close()
 
-def status_class(status):
-    return {"Passed": "ok", "Warning": "warn", "Critical": "bad"}.get(status, "warn")
+
+def load_banned_rules():
+    if os.path.exists(BANNED_WORDS_FILE):
+        with open(BANNED_WORDS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "english_banned": ["not my problem", "I don't care", "whatever"],
+        "spanish_banned": [],
+        "english_offensive": ["idiot", "stupid"],
+        "spanish_offensive": [],
+    }
+
+
+def save_banned_rules(rules):
+    with open(BANNED_WORDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(rules, f, indent=2, ensure_ascii=False)
+
+
+# ==========================================
+# 3. STYLING
+# ==========================================
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+    html, body, [class*="css"] { font-family: 'Inter', -apple-system, sans-serif; }
+    .main { background-color: #0A0D12; }
+    section[data-testid="stSidebar"] { background-color: #0D1117; border-right: 1px solid #1D232E; }
+    h1, h2, h3, h4 { letter-spacing: -0.01em; }
+
+    /* Identifier chips — the one visual motif used for every Call ID / Employee ID */
+    .id-chip {
+        font-family: 'IBM Plex Mono', monospace;
+        font-size: 12px;
+        color: #9AA5B8;
+        background: #171C25;
+        border: 1px solid #262D3A;
+        padding: 2px 8px;
+        border-radius: 5px;
+        letter-spacing: 0.02em;
+        display: inline-block;
+    }
+
+    /* Status badges */
+    .status-badge {
+        display: inline-block;
+        font-size: 12px;
+        font-weight: 600;
+        padding: 3px 10px;
+        border-radius: 999px;
+        letter-spacing: 0.01em;
+        white-space: nowrap;
+    }
+    .badge-passed   { background: rgba(63, 182, 139, 0.15); color: #3FB68B; border: 1px solid rgba(63,182,139,0.35); }
+    .badge-warning  { background: rgba(224, 167, 62, 0.15); color: #E0A73E; border: 1px solid rgba(224,167,62,0.35); }
+    .badge-critical { background: rgba(229, 72, 77, 0.15);  color: #E5484D; border: 1px solid rgba(229,72,77,0.35); }
+
+    .critical-alert-card {
+        background: rgba(229, 72, 77, 0.06);
+        border: 1px solid rgba(229, 72, 77, 0.35);
+        border-left: 3px solid #E5484D;
+        border-radius: 8px;
+        padding: 14px 16px;
+        margin-bottom: 8px;
+    }
+
+    .col-header { color: #8A94A6; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; }
+    .row-divider { margin: 4px 0 10px; border: none; border-top: 1px solid #1D232E; }
+
+    .audit-row-ok, .audit-row-err {
+        padding: 6px 10px; border-radius: 6px; font-size: 13px; margin-bottom: 4px;
+    }
+    .audit-row-ok { background: rgba(63,182,139,0.08); }
+    .audit-row-err { background: rgba(229,72,77,0.08); color: #E5484D; }
+
+    [data-testid="stMetric"] { background-color: #12161D; border: 1px solid #232935; padding: 14px 16px; border-radius: 10px; }
+    [data-testid="stMetricLabel"] { color: #8A94A6; }
+    [data-testid="stMetricValue"] { color: #EAEDF3; }
+
+    div.stButton > button { border-radius: 7px; font-weight: 500; }
+    </style>
+""", unsafe_allow_html=True)
+
 
 def status_badge(status):
-    cls = status_class(status)
-    return f'<span class="badge badge-{cls}">{status}</span>'
+    styles = {
+        "Passed": ("badge-passed", "🟢"),
+        "Warning": ("badge-warning", "🟡"),
+        "Critical": ("badge-critical", "🔴"),
+    }
+    cls, emoji = styles.get(status, ("badge-warning", "⚪"))
+    return f"<span class='status-badge {cls}'>{emoji} {status}</span>"
 
-def derive_reason(violations_json, profanity_flag, summary):
+
+def id_chip(value):
+    return f"<span class='id-chip'>{value}</span>"
+
+
+# ==========================================
+# 4. ROUTER / STATE MANAGEMENT
+# ==========================================
+def sync_query_params(params):
+    """Best-effort URL sync. Safe no-op on Streamlit versions without st.query_params."""
     try:
-        violations = json.loads(violations_json) if violations_json else []
+        st.query_params.clear()
+        st.query_params.update(params)
     except Exception:
-        violations = []
-    if violations:
-        first = violations[0]
-        return first if len(violations) == 1 else f"{first} (+{len(violations) - 1} more)"
-    if profanity_flag:
-        return "Offensive language detected"
-    if summary:
-        return (summary[:90] + "\u2026") if len(summary) > 90 else summary
-    return "Below quality threshold"
+        pass
 
-# ==========================================
-# 5. AUTH GATE
-# ==========================================
-def check_password():
-    if "password_correct" not in st.session_state:
-        st.session_state["password_correct"] = False
-    if st.session_state["password_correct"]:
-        return True
 
-    st.markdown(LOGIN_CSS, unsafe_allow_html=True)
-    st.markdown("<br><br>", unsafe_allow_html=True)
-    col1, col2, col3 = st.columns([1, 1.2, 1])
-    with col2:
-        st.markdown('<div class="auth-card">', unsafe_allow_html=True)
-        st.markdown('<div class="auth-eyebrow">ENTERPRISE QA CONSOLE</div>', unsafe_allow_html=True)
-        st.markdown('<div class="auth-title">Sign in</div>', unsafe_allow_html=True)
-        password_input = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Password")
-        if st.button("Sign in", use_container_width=True, type="primary"):
-            if password_input == LOGIN_PASSWORD:
-                st.session_state["password_correct"] = True
-                st.rerun()
-            else:
-                st.error("Incorrect password.")
-        st.markdown('</div>', unsafe_allow_html=True)
-    return False
+def read_query_params():
+    try:
+        return dict(st.query_params)
+    except Exception:
+        return {}
 
-# ==========================================
-# 6. ROUTING
-# ==========================================
-def go_to(page, agent_id=None, call_id=None):
-    st.query_params.clear()
-    st.query_params["page"] = page
+
+_qp = read_query_params()
+if "current_view" not in st.session_state:
+    st.session_state.current_view = _qp.get("view", "Dashboard")
+if "selected_agent" not in st.session_state:
+    st.session_state.selected_agent = _qp.get("agent_id")
+if "selected_call" not in st.session_state:
+    st.session_state.selected_call = _qp.get("call_id")
+if "previous_view" not in st.session_state:
+    st.session_state.previous_view = None
+if "last_audited_calls" not in st.session_state:
+    st.session_state.last_audited_calls = None
+
+
+def navigate_to(view, agent_id=None, call_id=None):
+    if view == "CallReport":
+        st.session_state.previous_view = st.session_state.current_view
+    st.session_state.current_view = view
     if agent_id is not None:
-        st.query_params["agent_id"] = str(agent_id)
+        st.session_state.selected_agent = agent_id
     if call_id is not None:
-        st.query_params["call_id"] = str(call_id)
-    st.rerun()
+        st.session_state.selected_call = call_id
+
+    params = {"view": view}
+    if view == "AgentDetails" and st.session_state.selected_agent:
+        params["agent_id"] = st.session_state.selected_agent
+    if view == "CallReport" and st.session_state.selected_call:
+        params["call_id"] = st.session_state.selected_call
+    sync_query_params(params)
+
+
+def active_nav_key():
+    cv = st.session_state.current_view
+    if cv == "AgentDetails":
+        return "Agents"
+    if cv == "CallReport":
+        prev = st.session_state.get("previous_view")
+        return "Agents" if prev == "AgentDetails" else ("Auditor" if prev == "Auditor" else "Dashboard")
+    return cv
+
 
 # ==========================================
-# 7. GLOBAL STYLES
+# 5. SIDEBAR NAVIGATION
 # ==========================================
-LOGIN_CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
-.auth-card { background:#141b2d; border:1px solid #262f45; border-radius:14px; padding:36px 32px; }
-.auth-eyebrow { font-family:'Inter',sans-serif; color:#6c7a94; font-size:11px; font-weight:600; letter-spacing:1.5px; margin-bottom:6px; }
-.auth-title { font-family:'Space Grotesk',sans-serif; color:#f1f5f9; font-size:26px; font-weight:600; margin-bottom:18px; }
-</style>
-"""
+with st.sidebar:
+    st.markdown("### 🛡️ QA Operations")
+    st.caption("Enterprise Console")
+    st.divider()
 
-APP_CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
-
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.main { background-color: #0a0e17; }
-h1, h2, h3 { font-family: 'Space Grotesk', sans-serif !important; color: #f1f5f9; }
-
-/* Top bar */
-.page-eyebrow { color:#6c7a94; font-size:12px; font-weight:600; letter-spacing:1.5px; text-transform:uppercase; margin-bottom:2px; }
-.page-title { font-family:'Space Grotesk',sans-serif; color:#f1f5f9; font-size:30px; font-weight:600; margin-bottom:4px; }
-.page-sub { color:#8b96ab; font-size:14px; margin-bottom:22px; }
-
-/* Search */
-div[data-testid="stTextInput"] input {
-    background-color:#141b2d !important; border:1px solid #262f45 !important;
-    border-radius:10px !important; color:#f1f5f9 !important; padding:12px 16px !important;
-}
-div[data-testid="stTextInput"] input:focus {
-    border-color:#6366f1 !important; box-shadow:0 0 0 3px rgba(99,102,241,0.18) !important;
-}
-
-/* Badges */
-.badge { padding:4px 11px; border-radius:20px; font-size:12px; font-weight:600; white-space:nowrap; }
-.badge-ok { background:rgba(52,211,153,0.14); color:#34d399; }
-.badge-warn { background:rgba(251,191,36,0.14); color:#fbbf24; }
-.badge-bad { background:rgba(248,113,113,0.14); color:#f87171; }
-
-/* Section headers */
-.section-title { font-family:'Space Grotesk',sans-serif; color:#f1f5f9; font-size:17px; font-weight:600; margin:6px 0 12px 0; display:flex; align-items:center; gap:8px; }
-.section-count { color:#6c7a94; font-size:13px; font-weight:500; }
-
-/* Row containers */
-div[data-testid="stVerticalBlockBorderWrapper"] {
-    background-color:#111726 !important; border-color:#232c42 !important; border-radius:10px !important;
-}
-
-/* Table header row */
-.tbl-head { color:#6c7a94; font-size:11px; font-weight:600; letter-spacing:0.8px; text-transform:uppercase; padding:0 4px 8px 4px; }
-
-.agent-name-cell { color:#f1f5f9; font-weight:600; font-size:14.5px; }
-.muted-cell { color:#8b96ab; font-size:13.5px; }
-.score-cell { color:#f1f5f9; font-weight:600; font-size:14.5px; }
-
-.reason-text { color:#c3cbdb; font-size:13.5px; }
-
-.empty-state { text-align:center; padding:60px 20px; color:#6c7a94; }
-.empty-state-title { font-family:'Space Grotesk',sans-serif; color:#c3cbdb; font-size:18px; font-weight:600; margin-bottom:6px; }
-
-.divider-line { height:1px; background:#1c2438; margin:26px 0; border:none; }
-
-.sidebar-brand { font-family:'Space Grotesk',sans-serif; color:#f1f5f9; font-size:19px; font-weight:600; margin-bottom:2px; }
-.sidebar-tag { color:#6c7a94; font-size:12.5px; margin-bottom:18px; }
-</style>
-"""
-
-def section_title(icon, text, count=None):
-    count_html = f'<span class="section-count">&nbsp;&middot;&nbsp;{count}</span>' if count is not None else ""
-    st.markdown(f'<div class="section-title">{icon} {text}{count_html}</div>', unsafe_allow_html=True)
-
-def empty_state(title, subtitle):
-    st.markdown(f'''
-        <div class="empty-state">
-            <div class="empty-state-title">{title}</div>
-            <div>{subtitle}</div>
-        </div>
-    ''', unsafe_allow_html=True)
-
-# ==========================================
-# 8. SIDEBAR
-# ==========================================
-def render_sidebar(current_page):
-    with st.sidebar:
-        st.markdown('<div class="sidebar-brand">\U0001F3A7 Enterprise QA</div>', unsafe_allow_html=True)
-        st.markdown('<div class="sidebar-tag">Manager Console</div>', unsafe_allow_html=True)
-
-        if st.button("\U0001F4CB  Dashboard", use_container_width=True, key="nav_dashboard",
-                     type="primary" if current_page == "dashboard" else "secondary"):
-            go_to("dashboard")
-        if st.button("\U0001F465  Agents", use_container_width=True, key="nav_agents",
-                     type="primary" if current_page in ("agents", "agent", "call") else "secondary"):
-            go_to("agents")
-        if st.button("\U0001F3A4  Run AI Audit", use_container_width=True, key="nav_auditor",
-                     type="primary" if current_page == "auditor" else "secondary"):
-            go_to("auditor")
-        if st.button("\u2699\uFE0F  Settings", use_container_width=True, key="nav_settings",
-                     type="primary" if current_page == "settings" else "secondary"):
-            go_to("settings")
-
-        st.markdown('<hr class="divider-line">', unsafe_allow_html=True)
-        if st.button("\U0001F512  Logout", use_container_width=True, key="nav_logout"):
-            st.session_state["password_correct"] = False
-            st.query_params.clear()
+    nav_items = [
+        ("Dashboard", "📊 Dashboard"),
+        ("Agents", "👥 Agents"),
+        ("Auditor", "🎙️ Run AI Audit"),
+        ("Settings", "⚙️ Settings"),
+    ]
+    active_key = active_nav_key()
+    for view_key, label in nav_items:
+        if st.button(label, use_container_width=True,
+                     type="primary" if active_key == view_key else "secondary",
+                     key=f"nav_{view_key}"):
+            navigate_to(view_key)
             st.rerun()
-        st.caption("Admin: Abdalrahman Ali")
+
+    st.divider()
+    if st.button("🚪 Logout", use_container_width=True):
+        for key in ("current_view", "selected_agent", "selected_call", "previous_view", "last_audited_calls"):
+            st.session_state.pop(key, None)
+        sync_query_params({})
+        st.rerun()
+
 
 # ==========================================
-# 9. DASHBOARD (workflow-first: search, filters, critical calls)
+# 6. VIEW: DASHBOARD
 # ==========================================
-def render_dashboard():
-    st.markdown('<div class="page-eyebrow">OVERVIEW</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-title">Dashboard</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-sub">Find an agent or call, then jump straight into the report.</div>', unsafe_allow_html=True)
+def view_dashboard():
+    st.title("🛡️ QA Operations")
+    st.caption("Find an agent, open their calls, and review AI-generated reports.")
 
-    search_term = st.text_input(
-        "search", label_visibility="collapsed",
-        placeholder="\U0001F50E  Search by agent name, employee ID, or call ID\u2026",
-        key="global_search"
+    st.markdown("##### 🔎 Search")
+    search_query = st.text_input(
+        "Search", placeholder="Agent name, employee ID, or call ID",
+        label_visibility="collapsed",
     )
 
-    if search_term.strip():
-        term = f"%{search_term.strip()}%"
-        agent_hits = run_query("SELECT id, name, team FROM agents WHERE name LIKE ? OR id LIKE ?", (term, term))
-        call_hits = run_query(
-            """SELECT c.id as call_id, c.agent_id, a.name as agent_name, c.date, c.status
-               FROM calls c LEFT JOIN agents a ON c.agent_id = a.id
-               WHERE c.id LIKE ? ORDER BY c.date DESC LIMIT 10""", (term,)
-        )
+    st.markdown("##### Filters")
+    fc1, fc2, fc3, fc4, fc5 = st.columns([1.6, 2, 1, 1, 1])
+    teams = ["All Teams"] + sorted(
+        [t for t in run_query("SELECT DISTINCT team FROM agents")["team"].dropna().tolist() if t]
+    )
+    with fc1:
+        team_filter = st.selectbox("Team", teams)
+    with fc2:
+        today = datetime.now().date()
+        date_range = st.date_input("Date range", value=(today - timedelta(days=365), today))
+    with fc3:
+        critical_only = st.checkbox("🔴 Critical only")
+    with fc4:
+        show_passed = st.checkbox("🟢 Passed")
+    with fc5:
+        show_failed = st.checkbox("🟡 Failed")
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        section_title("\U0001F50E", "Search results")
-
-        if agent_hits.empty and call_hits.empty:
-            empty_state("No matches", "Try a different name, employee ID, or call ID.")
-        else:
-            for _, row in agent_hits.iterrows():
-                with st.container(border=True):
-                    c1, c2, c3 = st.columns([3, 2, 1.2])
-                    c1.markdown(f'<div class="agent-name-cell">{row["name"]}</div>', unsafe_allow_html=True)
-                    c2.markdown(f'<div class="muted-cell">Agent \u00b7 {row["id"]} \u00b7 {row["team"] or "\u2014"}</div>', unsafe_allow_html=True)
-                    if c3.button("Open profile", key=f"srch_agent_{row['id']}", use_container_width=True):
-                        go_to("agent", agent_id=row["id"])
-            for _, row in call_hits.iterrows():
-                with st.container(border=True):
-                    c1, c2, c3 = st.columns([3, 2, 1.2])
-                    c1.markdown(f'<div class="agent-name-cell">{row["call_id"]}</div>', unsafe_allow_html=True)
-                    c2.markdown(f'<div class="muted-cell">Call \u00b7 {row["agent_name"] or "Unknown agent"} \u00b7 {format_dt(row["date"])}</div>', unsafe_allow_html=True)
-                    if c3.button("Open report", key=f"srch_call_{row['call_id']}", use_container_width=True):
-                        go_to("call", call_id=row["call_id"])
-        st.markdown('<hr class="divider-line">', unsafe_allow_html=True)
-
-    # ---- Filters ----
-    all_calls = run_query("""
-        SELECT c.id as call_id, c.agent_id, a.name as agent_name, a.team as team,
-               c.date, c.qa_score, c.status
-        FROM calls c LEFT JOIN agents a ON c.agent_id = a.id
-        ORDER BY c.date DESC
-    """)
-    teams = run_query("SELECT DISTINCT team FROM agents WHERE team IS NOT NULL AND team != ''")
-    team_options = ["All teams"] + sorted(teams["team"].tolist()) if not teams.empty else ["All teams"]
-
-    f1, f2, f3 = st.columns([2, 1.3, 2])
-    with f1:
-        default_start = date.today() - timedelta(days=30)
-        date_range = st.date_input("Date range", value=(default_start, date.today()), key="filter_dates")
-    with f2:
-        team_filter = st.selectbox("Team", team_options, key="filter_team")
-    with f3:
-        status_filter = st.multiselect("Status", ["Critical", "Warning", "Passed"],
-                                        default=["Critical", "Warning", "Passed"], key="filter_status")
-
-    filtered = all_calls.copy()
-    if not filtered.empty:
-        filtered["_date_only"] = pd.to_datetime(filtered["date"], errors="coerce").dt.date
-        if isinstance(date_range, tuple) and len(date_range) == 2:
-            start_d, end_d = date_range
-            filtered = filtered[(filtered["_date_only"] >= start_d) & (filtered["_date_only"] <= end_d)]
-        if team_filter != "All teams":
-            filtered = filtered[filtered["team"] == team_filter]
-        if status_filter:
-            filtered = filtered[filtered["status"].isin(status_filter)]
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    section_title("\U0001F4CB", "Calls", count=len(filtered))
-
-    if filtered.empty:
-        if all_calls.empty:
-            empty_state("No calls yet", "Run your first AI audit to start building the call log.")
-        else:
-            empty_state("No calls match these filters", "Try widening the date range or status filter.")
+    # "Failed" bundles Warning + Critical statuses; Critical-only overrides the rest.
+    status_list = None
+    if critical_only:
+        status_list = ["Critical"]
     else:
-        hc1, hc2, hc3, hc4, hc5, hc6 = st.columns([2.3, 2, 1.8, 1.2, 1.3, 1.4])
-        for col, label in zip([hc1, hc2, hc3, hc4, hc5], ["Agent", "Call ID", "Date", "Score", "Status"]):
-            col.markdown(f'<div class="tbl-head">{label}</div>', unsafe_allow_html=True)
+        chosen = []
+        if show_passed:
+            chosen.append("Passed")
+        if show_failed:
+            chosen += ["Warning", "Critical"]
+        if chosen:
+            status_list = list(dict.fromkeys(chosen))
 
-        for _, row in filtered.head(30).iterrows():
-            with st.container(border=True):
-                c1, c2, c3, c4, c5, c6 = st.columns([2.3, 2, 1.8, 1.2, 1.3, 1.4])
-                c1.markdown(f'<div class="agent-name-cell">{row["agent_name"] or "Unknown"}</div>', unsafe_allow_html=True)
-                c2.markdown(f'<div class="muted-cell">{row["call_id"]}</div>', unsafe_allow_html=True)
-                c3.markdown(f'<div class="muted-cell">{format_dt(row["date"], "%b %d, %Y")}</div>', unsafe_allow_html=True)
-                c4.markdown(f'<div class="score-cell">{row["qa_score"]}/10</div>', unsafe_allow_html=True)
-                c5.markdown(status_badge(row["status"]), unsafe_allow_html=True)
-                if c6.button("Open report", key=f"dash_call_{row['call_id']}", use_container_width=True):
-                    go_to("call", call_id=row["call_id"])
-        if len(filtered) > 30:
-            st.caption(f"Showing 30 of {len(filtered)} matching calls \u2014 narrow the filters to see more precisely.")
+    start_date = end_date = None
+    if isinstance(date_range, (list, tuple)):
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+        elif len(date_range) == 1:
+            start_date = end_date = date_range[0]
+    elif date_range:
+        start_date = end_date = date_range
 
-    # ---- Critical calls (always visible, independent of filters) ----
-    st.markdown('<hr class="divider-line">', unsafe_allow_html=True)
-    critical_df = run_query("""
-        SELECT c.id as call_id, c.qa_score, a.name as agent_name, a.id as agent_id,
-               c.profanity_detected, r.summary, r.violations
+    query = """
+        SELECT c.id as call_id, a.name as agent_name, a.id as employee_id,
+               c.date, c.duration, c.qa_score, c.status
+        FROM calls c JOIN agents a ON c.agent_id = a.id
+        WHERE 1=1
+    """
+    params = []
+    if search_query:
+        like = f"%{search_query}%"
+        query += " AND (a.name LIKE ? OR a.id LIKE ? OR c.id LIKE ?)"
+        params += [like, like, like]
+    if team_filter != "All Teams":
+        query += " AND a.team = ?"
+        params.append(team_filter)
+    if status_list:
+        query += f" AND c.status IN ({','.join(['?'] * len(status_list))})"
+        params += status_list
+    if start_date:
+        query += " AND substr(c.date, 1, 10) >= ?"
+        params.append(start_date.isoformat())
+    if end_date:
+        query += " AND substr(c.date, 1, 10) <= ?"
+        params.append(end_date.isoformat())
+    query += " ORDER BY c.date DESC LIMIT 25"
+    df_calls = run_query(query, tuple(params))
+
+    st.markdown("#### 📋 Calls")
+    if df_calls.empty:
+        st.info("No calls match your search and filters.")
+    else:
+        col_widths = [2.2, 1.5, 1.3, 1.0, 1.0, 1.3, 1.2]
+        headers = ["Agent", "Call ID", "Date", "Duration", "Score", "Status", ""]
+        header_cols = st.columns(col_widths)
+        for col, label in zip(header_cols, headers):
+            if label:
+                col.markdown(f"<span class='col-header'>{label.upper()}</span>", unsafe_allow_html=True)
+
+        for _, row in df_calls.iterrows():
+            cols = st.columns(col_widths)
+            cols[0].markdown(f"**{row['agent_name']}**<br>{id_chip(row['employee_id'])}", unsafe_allow_html=True)
+            cols[1].markdown(id_chip(row['call_id']), unsafe_allow_html=True)
+            cols[2].write(str(row['date'])[:16])
+            cols[3].write(row['duration'] or "—")
+            cols[4].write(f"{row['qa_score']}/10")
+            cols[5].markdown(status_badge(row['status']), unsafe_allow_html=True)
+            if cols[6].button("Open →", key=f"open_call_{row['call_id']}", use_container_width=True):
+                navigate_to("CallReport", call_id=row['call_id'])
+                st.rerun()
+            st.markdown("<hr class='row-divider'>", unsafe_allow_html=True)
+
+    st.markdown("#### 🚨 Critical Calls")
+    crit_query = """
+        SELECT c.id as call_id, a.name as agent_name, c.qa_score, r.summary
         FROM calls c
         JOIN agents a ON c.agent_id = a.id
         JOIN reports r ON c.id = r.call_id
         WHERE c.status = 'Critical'
-        ORDER BY c.date DESC
-    """)
-    section_title("\U0001F534", "Critical calls needing review", count=len(critical_df))
+    """
+    crit_params = []
+    if team_filter != "All Teams":
+        crit_query += " AND a.team = ?"
+        crit_params.append(team_filter)
+    if start_date:
+        crit_query += " AND substr(c.date, 1, 10) >= ?"
+        crit_params.append(start_date.isoformat())
+    if end_date:
+        crit_query += " AND substr(c.date, 1, 10) <= ?"
+        crit_params.append(end_date.isoformat())
+    crit_query += " ORDER BY c.date DESC LIMIT 10"
+    df_critical = run_query(crit_query, tuple(crit_params))
 
-    if critical_df.empty:
-        empty_state("Nothing critical right now", "Critical calls will show up here the moment they're flagged.")
+    if df_critical.empty:
+        st.success("No critical calls right now.")
     else:
-        for _, row in critical_df.iterrows():
-            reason = derive_reason(row["violations"], row["profanity_detected"], row["summary"])
-            with st.container(border=True):
-                c1, c2, c3, c4 = st.columns([2, 1, 4, 1.6])
-                c1.markdown(f'<div class="agent-name-cell">{row["agent_name"]}</div>', unsafe_allow_html=True)
-                c2.markdown(f'<div class="score-cell">{row["qa_score"]}/10</div>', unsafe_allow_html=True)
-                c3.markdown(f'<div class="reason-text">{reason}</div>', unsafe_allow_html=True)
-                if c4.button("Open report", key=f"crit_{row['call_id']}", use_container_width=True, type="primary"):
-                    go_to("call", call_id=row["call_id"])
+        for _, row in df_critical.iterrows():
+            reason = (row['summary'] or "No summary available.").strip()
+            if len(reason) > 160:
+                reason = reason[:160].rstrip() + "…"
+            st.markdown(f"""
+                <div class="critical-alert-card">
+                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+                        <div>
+                            <div style="font-weight:600;color:#EAEDF3;">{row['agent_name']}</div>
+                            <div style="color:#8A94A6;font-size:13px;margin-top:2px;">{reason}</div>
+                        </div>
+                        <div class="status-badge badge-critical">{row['qa_score']}/10</div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+            if st.button("Open Report →", key=f"crit_open_{row['call_id']}"):
+                navigate_to("CallReport", call_id=row['call_id'])
+                st.rerun()
+
 
 # ==========================================
-# 10. AGENTS DIRECTORY
+# 7. VIEW: AGENTS
 # ==========================================
-def render_agents():
-    st.markdown('<div class="page-eyebrow">TEAM</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-title">Agents</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-sub">Open an agent to see their full call history.</div>', unsafe_allow_html=True)
+def view_agents():
+    st.title("👥 Agents")
+    st.caption("Find an agent, then open their calls.")
 
-    df = run_query("""
+    search = st.text_input("Search agents", placeholder="Search by agent name or employee ID",
+                            label_visibility="collapsed")
+
+    query = """
         SELECT a.id, a.name, a.team,
                MAX(c.date) as last_call,
-               SUM(CASE WHEN c.status = 'Critical' THEN 1 ELSE 0 END) as critical_count,
-               COUNT(c.id) as total_calls
+               SUM(CASE WHEN c.status = 'Critical' THEN 1 ELSE 0 END) as critical_count
         FROM agents a
         LEFT JOIN calls c ON a.id = c.agent_id
-        GROUP BY a.id
-        ORDER BY a.name
-    """)
+    """
+    params = []
+    if search:
+        like = f"%{search}%"
+        query += " WHERE a.name LIKE ? OR a.id LIKE ?"
+        params = [like, like]
+    query += " GROUP BY a.id ORDER BY a.name"
+    df_agents = run_query(query, tuple(params))
 
-    if df.empty:
-        empty_state("No agents yet", "Agents are added automatically the first time you audit one of their calls.")
+    if df_agents.empty:
+        st.info("No agents yet. Agents are added automatically the first time you run an AI audit for them.")
         return
 
-    hc1, hc2, hc3, hc4, hc5, hc6 = st.columns([2.4, 1.6, 1.8, 1.8, 1.6, 1.4])
-    for col, label in zip([hc1, hc2, hc3, hc4, hc5], ["Agent", "Employee ID", "Team", "Last call", "Critical calls"]):
-        col.markdown(f'<div class="tbl-head">{label}</div>', unsafe_allow_html=True)
+    col_widths = [2.2, 1.6, 1.6, 1.6, 1.4, 1.3]
+    headers = ["Agent Name", "Employee ID", "Team", "Last Call", "Critical Calls", ""]
+    header_cols = st.columns(col_widths)
+    for col, label in zip(header_cols, headers):
+        if label:
+            col.markdown(f"<span class='col-header'>{label.upper()}</span>", unsafe_allow_html=True)
 
-    for _, row in df.iterrows():
-        with st.container(border=True):
-            c1, c2, c3, c4, c5, c6 = st.columns([2.4, 1.6, 1.8, 1.8, 1.6, 1.4])
-            c1.markdown(f'<div class="agent-name-cell">{row["name"]}</div>', unsafe_allow_html=True)
-            c2.markdown(f'<div class="muted-cell">{row["id"]}</div>', unsafe_allow_html=True)
-            c3.markdown(f'<div class="muted-cell">{row["team"] or "\u2014"}</div>', unsafe_allow_html=True)
-            c4.markdown(f'<div class="muted-cell">{format_dt(row["last_call"], "%b %d, %Y")}</div>', unsafe_allow_html=True)
-            crit = int(row["critical_count"] or 0)
-            crit_html = f'<span class="badge badge-bad">{crit}</span>' if crit > 0 else '<span class="muted-cell">0</span>'
-            c5.markdown(crit_html, unsafe_allow_html=True)
-            if c6.button("Open calls", key=f"agent_open_{row['id']}", use_container_width=True):
-                go_to("agent", agent_id=row["id"])
+    for _, ag in df_agents.iterrows():
+        crit = int(ag['critical_count'] or 0)
+        last_call = str(ag['last_call'])[:16] if ag['last_call'] else "No calls yet"
+        crit_html = (f"<span class='status-badge badge-critical'>{crit}</span>" if crit > 0
+                     else "<span class='status-badge badge-passed'>0</span>")
+
+        cols = st.columns(col_widths)
+        cols[0].markdown(f"**{ag['name']}**")
+        cols[1].markdown(id_chip(ag['id']), unsafe_allow_html=True)
+        cols[2].write(ag['team'] or "—")
+        cols[3].write(last_call)
+        cols[4].markdown(crit_html, unsafe_allow_html=True)
+        if cols[5].button("Open Calls →", key=f"open_agent_{ag['id']}", use_container_width=True):
+            navigate_to("AgentDetails", agent_id=ag['id'])
+            st.rerun()
+        st.markdown("<hr class='row-divider'>", unsafe_allow_html=True)
+
 
 # ==========================================
-# 11. AGENT DETAILS
+# 8. VIEW: AGENT DETAILS
 # ==========================================
-def render_agent_detail(agent_id):
+def view_agent_details():
+    agent_id = st.session_state.selected_agent
+    if not agent_id:
+        st.warning("No agent selected.")
+        if st.button("← Back to Agents"):
+            navigate_to("Agents")
+            st.rerun()
+        return
+
     agent_df = run_query("SELECT * FROM agents WHERE id = ?", (agent_id,))
     if agent_df.empty:
-        empty_state("Agent not found", "This agent may have been removed.")
-        if st.button("\u2190 Back to Agents", key="back_agents_missing"):
-            go_to("agents")
+        st.error("This agent no longer exists.")
+        if st.button("← Back to Agents"):
+            navigate_to("Agents")
+            st.rerun()
         return
-    agent = agent_df.iloc[0]
+    agent_info = agent_df.iloc[0]
 
-    if st.button("\u2190 Back to Agents", key="back_agents"):
-        go_to("agents")
+    if st.button("← Back to Agents"):
+        navigate_to("Agents")
+        st.rerun()
 
-    st.markdown('<div class="page-eyebrow">AGENT PROFILE</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="page-title">{agent["name"]}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="page-sub">Employee ID {agent["id"]} \u00b7 {agent["team"] or "No team set"}</div>', unsafe_allow_html=True)
+    st.title(f"👤 {agent_info['name']}")
+    st.markdown(id_chip(agent_info['id']), unsafe_allow_html=True)
+    st.caption(f"Team: {agent_info['team'] or '—'}  ·  {agent_info['email'] or 'No email on file'}")
 
-    calls_df = run_query(
+    st.markdown("#### 📞 Call History")
+    df_calls = run_query(
         "SELECT id as call_id, date, duration, qa_score, status FROM calls WHERE agent_id = ? ORDER BY date DESC",
-        (agent_id,)
+        (agent_id,),
     )
 
-    section_title("\U0001F4DE", "Calls", count=len(calls_df))
-
-    if calls_df.empty:
-        empty_state("No calls audited yet", "Run an AI audit for this agent to see reports here.")
+    if df_calls.empty:
+        st.info("No calls recorded for this agent yet.")
         return
 
-    hc1, hc2, hc3, hc4, hc5, hc6 = st.columns([1.8, 1.8, 1.2, 1.2, 1.4, 1.4])
-    for col, label in zip([hc1, hc2, hc3, hc4, hc5], ["Call ID", "Date", "Duration", "Score", "Status"]):
-        col.markdown(f'<div class="tbl-head">{label}</div>', unsafe_allow_html=True)
+    col_widths = [1.8, 1.6, 1.1, 1.0, 1.3, 1.3]
+    headers = ["Call ID", "Date", "Duration", "QA Score", "Status", ""]
+    header_cols = st.columns(col_widths)
+    for col, label in zip(header_cols, headers):
+        if label:
+            col.markdown(f"<span class='col-header'>{label.upper()}</span>", unsafe_allow_html=True)
 
-    for _, row in calls_df.iterrows():
-        with st.container(border=True):
-            c1, c2, c3, c4, c5, c6 = st.columns([1.8, 1.8, 1.2, 1.2, 1.4, 1.4])
-            c1.markdown(f'<div class="agent-name-cell">{row["call_id"]}</div>', unsafe_allow_html=True)
-            c2.markdown(f'<div class="muted-cell">{format_dt(row["date"])}</div>', unsafe_allow_html=True)
-            c3.markdown(f'<div class="muted-cell">{row["duration"] or "\u2014"}</div>', unsafe_allow_html=True)
-            c4.markdown(f'<div class="score-cell">{row["qa_score"]}/10</div>', unsafe_allow_html=True)
-            c5.markdown(status_badge(row["status"]), unsafe_allow_html=True)
-            if c6.button("View report", key=f"view_call_{row['call_id']}", use_container_width=True):
-                go_to("call", call_id=row["call_id"])
+    for _, call in df_calls.iterrows():
+        cols = st.columns(col_widths)
+        cols[0].markdown(id_chip(call['call_id']), unsafe_allow_html=True)
+        cols[1].write(str(call['date'])[:16])
+        cols[2].write(call['duration'] or "—")
+        cols[3].write(f"{call['qa_score']}/10")
+        cols[4].markdown(status_badge(call['status']), unsafe_allow_html=True)
+        if cols[5].button("View Report →", key=f"view_call_{call['call_id']}", use_container_width=True):
+            navigate_to("CallReport", call_id=call['call_id'])
+            st.rerun()
+        st.markdown("<hr class='row-divider'>", unsafe_allow_html=True)
+
 
 # ==========================================
-# 12. CALL REPORT
+# 9. VIEW: CALL REPORT
 # ==========================================
-def render_call_report(call_id):
-    call_df = run_query("""
-        SELECT c.*, a.name as agent_name, a.id as agent_id_ref,
-               r.language, r.summary, r.violations, r.grammar_feedback
+def view_call_report():
+    call_id = st.session_state.selected_call
+    back_target = st.session_state.get("previous_view") or "Dashboard"
+
+    if not call_id:
+        st.warning("No call selected.")
+        if st.button("← Back"):
+            navigate_to(back_target)
+            st.rerun()
+        return
+
+    df = run_query("""
+        SELECT c.*, a.name as agent_name, a.id as employee_id, a.team,
+               r.language, r.summary, r.violations, r.grammar_feedback, r.manager_notes
         FROM calls c
         JOIN agents a ON c.agent_id = a.id
         JOIN reports r ON c.id = r.call_id
         WHERE c.id = ?
     """, (call_id,))
 
-    if call_df.empty:
-        empty_state("Report not found", "This call may have been removed.")
-        if st.button("\u2190 Back to Agents", key="back_missing_call"):
-            go_to("agents")
+    if df.empty:
+        st.error("This report could not be found.")
+        if st.button("← Back"):
+            navigate_to(back_target)
+            st.rerun()
         return
-    call_data = call_df.iloc[0]
 
-    if st.button("\u2190 Back to agent", key="back_agent_from_call"):
-        go_to("agent", agent_id=call_data["agent_id_ref"])
+    call_data = df.iloc[0]
 
-    st.markdown('<div class="page-eyebrow">CALL REPORT</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="page-title">{call_data["id"]}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="page-sub">{call_data["agent_name"]} \u00b7 {format_dt(call_data["date"])}</div>', unsafe_allow_html=True)
+    if st.button("← Back"):
+        navigate_to(back_target)
+        st.rerun()
 
-    if call_data["audio_file"] and os.path.exists(call_data["audio_file"]):
-        st.audio(call_data["audio_file"])
-    else:
-        st.caption("Audio file no longer available on this server.")
+    st.title("📄 Call Report")
+    st.markdown(id_chip(call_id), unsafe_allow_html=True)
+    st.caption(f"Agent: {call_data['agent_name']} ({call_data['employee_id']})  ·  Audited: {str(call_data['date'])[:16]}")
 
-    sc1, sc2, sc3 = st.columns(3)
-    sc1.metric("QA Score", f"{call_data['qa_score']}/10")
-    sc2.metric("Status", call_data["status"])
-    sc3.metric("Profanity", "Yes" if call_data["profanity_detected"] else "No")
+    hc1, hc2, hc3 = st.columns(3)
+    hc1.metric("QA Score", f"{call_data['qa_score']}/10")
+    with hc2:
+        st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
+        st.markdown(status_badge(call_data['status']), unsafe_allow_html=True)
+    hc3.metric("Profanity", "Flagged ⚠️" if call_data['profanity_detected'] else "Clean ✅")
 
-    st.markdown('<hr class="divider-line">', unsafe_allow_html=True)
+    st.divider()
 
-    with st.expander("\U0001F4DD Executive summary", expanded=True):
-        st.write(call_data["summary"])
+    with st.expander("🔊 Audio Record Player", expanded=True):
+        if call_data['audio_file'] and os.path.exists(str(call_data['audio_file'])):
+            st.audio(call_data['audio_file'])
+        else:
+            st.info("Audio file archived or unavailable locally.")
 
-    with st.expander("\U0001F5E3\uFE0F Speech transcription"):
-        st.write(call_data["transcription"])
+    with st.expander("📝 Executive Summary", expanded=True):
+        st.info(call_data['summary'] or "No summary available.")
 
-    with st.expander("\U0001F6A8 Compliance & violations", expanded=True):
+    with st.expander("🗣️ Speech Transcription"):
+        st.write(call_data['transcription'])
+
+    with st.expander("🚨 Detected Violations & Compliance", expanded=True):
         try:
-            violations = json.loads(call_data["violations"]) if call_data["violations"] else []
-        except Exception:
-            violations = []
+            violations = json.loads(call_data['violations'])
+        except (TypeError, ValueError):
+            violations = None
         if violations:
             for v in violations:
-                st.error(f"\u2022 {v}")
+                st.error(f"• {v}")
         else:
             st.success("No compliance violations detected.")
 
-    with st.expander("\u270D\uFE0F Grammar & syntax"):
+    with st.expander("✍️ Grammar Analysis"):
         try:
-            grammar = json.loads(call_data["grammar_feedback"]) if call_data["grammar_feedback"] else []
-        except Exception:
-            grammar = []
+            grammar = json.loads(call_data['grammar_feedback'])
+        except (TypeError, ValueError):
+            grammar = None
         if grammar:
-            for idx, err in enumerate(grammar, 1):
-                st.markdown(f"**Issue #{idx}**")
-                st.warning(f"Spoken: {err.get('error')}")
-                st.success(f"Correction: {err.get('correction')}")
+            for err in grammar:
+                st.warning(f"Spoken: {err.get('error')} ➔ Corrected: {err.get('correction')}")
                 st.caption(f"Reason: {err.get('reason')}")
-                st.markdown("---")
         else:
-            st.success("No grammar errors detected.")
+            st.success("Perfect grammar!")
+
+    with st.expander("💡 Manager Notes"):
+        st.markdown(f"**Notes:** {call_data['manager_notes'] or 'No manual notes added yet.'}")
 
     st.download_button(
-        label="\U0001F4E5 Download report (CSV)",
+        label="📥 Export Report Data (CSV)",
         data=pd.DataFrame([call_data]).to_csv(index=False),
         file_name=f"Report_{call_id}.csv",
         mime="text/csv",
     )
 
+
 # ==========================================
-# 13. RUN AI AUDIT
+# 10. VIEW: RUN AI AUDIT (multi-file)
 # ==========================================
-def render_auditor():
-    st.markdown('<div class="page-eyebrow">NEW AUDIT</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-title">Run AI Audit</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-sub">Upload a call recording to transcribe, score, and file it automatically.</div>', unsafe_allow_html=True)
+def view_auditor():
+    st.title("🎙️ Run AI Audit")
+    st.markdown("Upload one or more customer service recordings for immediate AI evaluation.")
 
     with st.form("audit_form"):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            agent_id = st.text_input("Employee ID (required)", placeholder="e.g. EMP001")
-        with col2:
-            agent_name = st.text_input("Agent name", placeholder="e.g. John Doe")
-        with col3:
-            agent_team = st.text_input("Team / department", placeholder="e.g. Technical Support")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            agent_id = st.text_input("🆔 Employee ID", placeholder="EMP001")
+        with c2:
+            agent_name = st.text_input("👨‍💼 Agent Name", placeholder="John Doe")
+        with c3:
+            agent_team = st.text_input("🏢 Team/Department", placeholder="Tech Support")
 
-        uploaded_file = st.file_uploader("Upload audio recording", type=["mp3", "wav", "m4a"])
-        submit_btn = st.form_submit_button("\U0001F680 Run audit", type="primary", use_container_width=True)
+        uploaded_files = st.file_uploader(
+            "📂 Upload Audio Records (multiple allowed)",
+            type=["mp3", "wav", "m4a"],
+            accept_multiple_files=True,
+        )
+        submit_btn = st.form_submit_button("🚀 Run AI Audit", type="primary")
 
     if submit_btn:
-        if not agent_id or not agent_name or not uploaded_file:
-            st.error("Please fill in all agent details and upload an audio file.")
+        if not agent_id or not agent_name or not uploaded_files:
+            st.error("⚠️ Please fill in all agent details and upload at least one audio file.")
+        elif not SERVER_GROQ_KEY:
+            st.error("⚠️ No Groq API key configured. Add GROQ_API_KEY in Settings → Secrets (Streamlit Cloud) "
+                      "or in .streamlit/secrets.toml locally.")
         else:
-            with st.spinner("Whisper & Llama are analyzing the call\u2026"):
+            client = OpenAI(api_key=SERVER_GROQ_KEY, base_url="https://api.groq.com/openai/v1")
+            banned_rules = load_banned_rules()
+
+            # Register the agent once — not once per file.
+            execute_query(
+                "INSERT OR IGNORE INTO agents (id, name, team, email) VALUES (?, ?, ?, ?)",
+                (agent_id, agent_name, agent_team, f"{agent_id}@company.com"),
+            )
+
+            total_files = len(uploaded_files)
+            progress_bar = st.progress(0.0)
+            status_area = st.container()
+            new_calls = []
+            success_count = 0
+
+            for index, uploaded_file in enumerate(uploaded_files):
                 try:
-                    call_uid = f"CALL_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                    audio_path = f"temp_{call_uid}.mp3"
+                    call_uid = f"CALL_{datetime.now().strftime('%Y%m%d%H%M%S')}_{index}"
+                    ext = os.path.splitext(uploaded_file.name)[1] or ".mp3"
+                    audio_path = f"temp_{call_uid}{ext}"
                     with open(audio_path, "wb") as f:
                         f.write(uploaded_file.getbuffer())
 
-                    client = OpenAI(api_key=SERVER_GROQ_KEY, base_url="https://api.groq.com/openai/v1")
-                    banned_rules = load_banned_words()
-
                     with open(audio_path, "rb") as audio_file:
-                        transcript_response = client.audio.transcriptions.create(model="whisper-large-v3", file=audio_file)
+                        transcript_response = client.audio.transcriptions.create(
+                            model="whisper-large-v3", file=audio_file
+                        )
                     transcript_text = transcript_response.text
 
                     prompt = f"""
-                    You are a strict Enterprise Quality Assurance Auditor.
+                    You are a strict Senior Quality Assurance Auditor. Your job is NOT to coach on politeness or style, but to find STRICT GRAMMATICAL ERRORS ONLY.
+
                     Transcript: "{transcript_text}"
-                    Reference Lists: Banned: {banned_rules.get('english_banned', [])}, Offensive: {banned_rules.get('english_offensive', [])}
-                    Tasks:
-                    1. Detect language.
-                    2. Check for banned/offensive words exactly. Set has_profanity.
-                    3. Check STRICT GRAMMAR ERRORS ONLY. Ignore style/politeness.
-                    4. Write an executive summary.
-                    Return EXACT JSON:
-                    {{"language": "English/Spanish", "has_profanity": true/false, "offensive_words_found": [], "banned_words_found": [], "grammar_errors": [{{"error": "str", "correction": "str", "reason": "str"}}], "audit_summary": "str"}}
+
+                    Reference Lists:
+                    - English Banned Phrases: {banned_rules.get('english_banned', [])}
+                    - Spanish Banned Phrases: {banned_rules.get('spanish_banned', [])}
+                    - English Offensive Words: {banned_rules.get('english_offensive', [])}
+                    - Spanish Offensive Words: {banned_rules.get('spanish_offensive', [])}
+
+                    Tasks to execute:
+                    1. Detect primary spoken language (English or Spanish).
+                    2. Check if the agent used ANY exact phrase from the Banned lists above. List them in `banned_words_found`. Set `has_profanity` to true if offensive words are found.
+                    3. Check if the agent used ANY exact word from the Offensive lists above. List them in `offensive_words_found`.
+                    4. Check for GRAMMAR ERRORS ONLY.
+                       - STRICT RULE: Do NOT flag sentences just because they lack politeness, or because you want a "better phrasing" (e.g., "Sorry for bothering" or "When did you leave?" are grammatically correct and MUST NOT be flagged).
+                       - Only flag undeniable grammar, tense, or syntax structural breakages (e.g., "He go" instead of "He goes").
+                       - If there are no true grammar errors, return an empty list [].
+                    5. Write a short executive audit summary paragraph.
+
+                    Return ONLY a valid JSON object matching this structure precisely:
+                    {{
+                      "language": "English/Spanish",
+                      "has_profanity": true/false,
+                      "offensive_words_found": [],
+                      "banned_words_found": [],
+                      "grammar_errors": [
+                        {{"error": "string", "correction": "string", "reason": "string"}}
+                      ],
+                      "audit_summary": "string summary paragraph"
+                    }}
                     """
 
                     response = client.chat.completions.create(
                         model="llama-3.3-70b-versatile",
                         response_format={"type": "json_object"},
-                        messages=[{"role": "user", "content": prompt}]
+                        messages=[{"role": "user", "content": prompt}],
                     )
                     result = json.loads(response.choices[0].message.content)
 
-                    base_score = 10.0
                     all_violations = result.get("offensive_words_found", []) + result.get("banned_words_found", [])
                     grammar_errs = result.get("grammar_errors", [])
 
+                    base_score = 10.0
                     base_score -= (len(result.get("offensive_words_found", [])) * 2.0)
                     base_score -= (len(result.get("banned_words_found", [])) * 1.0)
                     base_score -= min(len(grammar_errs) * 0.25, 2.0)
                     final_score = round(max(0.0, min(10.0, base_score)), 2)
 
-                    status = "Passed" if final_score >= 8 else ("Warning" if final_score >= 5 else "Critical")
+                    call_status = "Passed" if final_score >= 8 else ("Warning" if final_score >= 5 else "Critical")
                     profanity_flag = 1 if result.get("has_profanity") else 0
 
-                    execute_query("INSERT OR IGNORE INTO agents (id, name, team, email) VALUES (?, ?, ?, ?)",
-                                  (agent_id, agent_name, agent_team, f"{agent_id}@company.com"))
+                    execute_query(
+                        """INSERT INTO calls (id, agent_id, date, duration, audio_file, transcription,
+                                               qa_score, grammar_score, status, profanity_detected)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (call_uid, agent_id, str(datetime.now()), "N/A", audio_path, transcript_text,
+                         final_score, 0, call_status, profanity_flag),
+                    )
+                    execute_query(
+                        """INSERT INTO reports (call_id, language, summary, violations, grammar_feedback, manager_notes)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (call_uid, result.get("language"), result.get("audit_summary"),
+                         json.dumps(all_violations), json.dumps(grammar_errs), ""),
+                    )
 
-                    execute_query("""INSERT INTO calls (id, agent_id, date, duration, audio_file, transcription, qa_score, grammar_score, status, profanity_detected)
-                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                                  (call_uid, agent_id, str(datetime.now()), "N/A", audio_path, transcript_text, final_score, 0, status, profanity_flag))
-
-                    execute_query("""INSERT INTO reports (call_id, language, summary, violations, grammar_feedback, manager_notes)
-                                     VALUES (?, ?, ?, ?, ?, ?)""",
-                                  (call_uid, result.get("language"), result.get("audit_summary"), json.dumps(all_violations), json.dumps(grammar_errs), ""))
-
-                    go_to("call", call_id=call_uid)
-
+                    new_calls.append((call_uid, uploaded_file.name, final_score, call_status))
+                    success_count += 1
+                    status_area.markdown(
+                        f"<div class='audit-row-ok'>✅ <b>{uploaded_file.name}</b> — {final_score}/10 "
+                        f"{status_badge(call_status)}</div>",
+                        unsafe_allow_html=True,
+                    )
                 except Exception as e:
-                    st.error(f"Core system error: {e}")
+                    status_area.markdown(
+                        f"<div class='audit-row-err'>❌ <b>{uploaded_file.name}</b> — {e}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                progress_bar.progress((index + 1) / total_files)
+
+            st.success(f"🎉 Audited {success_count} of {total_files} call(s) for {agent_name}.")
+            if new_calls:
+                st.session_state.last_audited_calls = new_calls
+
+    if st.session_state.get("last_audited_calls"):
+        st.markdown("#### ✅ Just Audited")
+        for call_uid, fname, score, call_status in st.session_state.last_audited_calls:
+            rc = st.columns([3, 1.2, 1.3, 1.5])
+            rc[0].write(fname)
+            rc[1].write(f"{score}/10")
+            rc[2].markdown(status_badge(call_status), unsafe_allow_html=True)
+            if rc[3].button("View Report →", key=f"view_new_{call_uid}", use_container_width=True):
+                navigate_to("CallReport", call_id=call_uid)
+                st.session_state.last_audited_calls = None
+                st.rerun()
+
 
 # ==========================================
-# 14. SETTINGS (compliance word lists)
+# 11. VIEW: SETTINGS
 # ==========================================
-def render_settings():
-    st.markdown('<div class="page-eyebrow">CONFIGURATION</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-title">Settings</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-sub">Manage the compliance word lists used during audits.</div>', unsafe_allow_html=True)
+def view_settings():
+    st.title("⚙️ Settings")
+    st.caption("Configure the words and phrases the AI auditor checks for.")
 
-    data = load_banned_words()
+    rules = load_banned_rules()
 
-    col_en, col_es = st.columns(2)
-    with col_en:
-        st.markdown("**English**")
-        en_banned = st.text_area("Banned phrases", value="\n".join(data.get("english_banned", [])), height=140, key="en_banned")
-        en_offensive = st.text_area("Offensive words", value="\n".join(data.get("english_offensive", [])), height=140, key="en_offensive")
-    with col_es:
-        st.markdown("**Spanish**")
-        es_banned = st.text_area("Banned phrases ", value="\n".join(data.get("spanish_banned", [])), height=140, key="es_banned")
-        es_offensive = st.text_area("Offensive words ", value="\n".join(data.get("spanish_offensive", [])), height=140, key="es_offensive")
+    st.markdown("#### 🚫 Banned Phrases")
+    st.caption("Exact phrases agents should never say (e.g. dismissive language). One per line.")
+    banned_en = st.text_area("English banned phrases", value="\n".join(rules.get("english_banned", [])), height=140)
+    banned_es = st.text_area("Spanish banned phrases", value="\n".join(rules.get("spanish_banned", [])), height=100)
 
-    st.caption("One entry per line. Changes apply to audits run after saving \u2014 past reports aren't recalculated.")
+    st.markdown("#### 🤬 Offensive Words")
+    st.caption("Individual words that should always be flagged as profanity. One per line.")
+    off_en = st.text_area("English offensive words", value="\n".join(rules.get("english_offensive", [])), height=100)
+    off_es = st.text_area("Spanish offensive words", value="\n".join(rules.get("spanish_offensive", [])), height=100)
 
-    if st.button("Save changes", type="primary", key="save_settings"):
-        new_data = {
-            "english_banned": [w.strip() for w in en_banned.split("\n") if w.strip()],
-            "english_offensive": [w.strip() for w in en_offensive.split("\n") if w.strip()],
-            "spanish_banned": [w.strip() for w in es_banned.split("\n") if w.strip()],
-            "spanish_offensive": [w.strip() for w in es_offensive.split("\n") if w.strip()],
-        }
-        save_banned_words(new_data)
-        st.success("Settings saved.")
+    if st.button("💾 Save Changes", type="primary"):
+        save_banned_rules({
+            "english_banned": [w.strip() for w in banned_en.splitlines() if w.strip()],
+            "spanish_banned": [w.strip() for w in banned_es.splitlines() if w.strip()],
+            "english_offensive": [w.strip() for w in off_en.splitlines() if w.strip()],
+            "spanish_offensive": [w.strip() for w in off_es.splitlines() if w.strip()],
+        })
+        st.success("Saved. New rules apply to the next audit you run.")
+
 
 # ==========================================
-# 15. MAIN
+# 12. ROUTE TO THE ACTIVE VIEW
 # ==========================================
-if not check_password():
-    st.stop()
-
-st.markdown(APP_CSS, unsafe_allow_html=True)
-
-_params = st.query_params
-current_page = _params.get("page", "dashboard")
-current_agent_id = _params.get("agent_id")
-current_call_id = _params.get("call_id")
-
-render_sidebar(current_page)
-
-if current_page == "dashboard":
-    render_dashboard()
-elif current_page == "agents":
-    render_agents()
-elif current_page == "agent" and current_agent_id:
-    render_agent_detail(current_agent_id)
-elif current_page == "call" and current_call_id:
-    render_call_report(current_call_id)
-elif current_page == "auditor":
-    render_auditor()
-elif current_page == "settings":
-    render_settings()
-else:
-    render_dashboard()
-    
+VIEW_ROUTER = {
+    "Dashboard": view_dashboard,
+    "Agents": view_agents,
+    "AgentDetails": view_agent_details,
+    "CallReport": view_call_report,
+    "Auditor": view_auditor,
+    "Settings": view_settings,
+}
+VIEW_ROUTER.get(st.session_state.current_view, view_dashboard)()
