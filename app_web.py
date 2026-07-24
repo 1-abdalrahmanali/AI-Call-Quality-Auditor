@@ -21,7 +21,7 @@ BANNED_WORDS_FILE = "banned_words.json"
 
 st.set_page_config(
     page_title="QA Operations Console",
-    page_icon="🛡️",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -237,10 +237,10 @@ with st.sidebar:
     st.divider()
 
     nav_items = [
-        ("Dashboard", "📊 Dashboard"),
-        ("Agents", "👥 Agents"),
+        ("Dashboard", " Dashboard"),
+        ("Agents", " Agents"),
         ("Auditor", "Audios"),
-        ("Settings", "⚙️ Settings"),
+        ("Settings", " Settings"),
     ]
     active_key = active_nav_key()
     for view_key, label in nav_items:
@@ -250,7 +250,7 @@ with st.sidebar:
             navigate_to(view_key)
             st.rerun()
 
-    if st.button("🚪 Logout", use_container_width=True):
+    if st.button(" Logout", use_container_width=True):
         for key in ("current_view", "selected_agent", "selected_call", "previous_view", "last_audited_calls"):
             st.session_state.pop(key, None)
         sync_query_params({})
@@ -268,7 +268,7 @@ def view_dashboard():
     st.title(" QA Operations")
     st.caption("Find an agent, open their calls, and review the reports.")
 
-    st.markdown("##### 🔎 Search")
+    st.markdown("#####  Search")
     search_query = st.text_input(
         "Search", placeholder="Agent name, employee ID, or call ID",
         label_visibility="collapsed",
@@ -339,7 +339,7 @@ def view_dashboard():
     query += " ORDER BY c.date DESC LIMIT 25"
     df_calls = run_query(query, tuple(params))
 
-    st.markdown("#### 📋 Calls")
+    st.markdown("####  Calls")
     if df_calls.empty:
         st.info("No calls match your search and filters.")
     else:
@@ -363,7 +363,7 @@ def view_dashboard():
                 st.rerun()
             st.markdown("<hr class='row-divider'>", unsafe_allow_html=True)
 
-    st.markdown("#### 🚨 Critical Calls")
+    st.markdown("####  Critical Calls")
     crit_query = """
         SELECT c.id as call_id, a.name as agent_name, c.qa_score, r.summary
         FROM calls c
@@ -490,7 +490,7 @@ def view_agent_details():
     st.markdown(id_chip(agent_info['id']), unsafe_allow_html=True)
     st.caption(f"Team: {agent_info['team'] or '—'}  ·  {agent_info['email'] or 'No email on file'}")
 
-    st.markdown("#### 📞 Call History")
+    st.markdown("#### Call History")
     df_calls = run_query(
         "SELECT id as call_id, date, duration, qa_score, status FROM calls WHERE agent_id = ? ORDER BY date DESC",
         (agent_id,),
@@ -556,7 +556,7 @@ def view_call_report():
         navigate_to(back_target)
         st.rerun()
 
-    st.title("📄 Call Report")
+    st.title(" Call Report")
     st.markdown(id_chip(call_id), unsafe_allow_html=True)
     st.caption(f"Agent: {call_data['agent_name']} ({call_data['employee_id']})  ·  Audited: {str(call_data['date'])[:16]}")
 
@@ -565,23 +565,23 @@ def view_call_report():
     with hc2:
         st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
         st.markdown(status_badge(call_data['status']), unsafe_allow_html=True)
-    hc3.metric("Profanity", "Flagged ⚠️" if call_data['profanity_detected'] else "Clean ✅")
+    hc3.metric("Profanity", "Flagged " if call_data['profanity_detected'] else "Clean ")
 
     st.divider()
 
-    with st.expander("🔊 Audio Record Player", expanded=True):
+    with st.expander(" Audio Record Player", expanded=True):
         if call_data['audio_file'] and os.path.exists(str(call_data['audio_file'])):
             st.audio(call_data['audio_file'])
         else:
             st.info("Audio file archived or unavailable locally.")
 
-    with st.expander("📝 Executive Summary", expanded=True):
+    with st.expander(" Executive Summary", expanded=True):
         st.info(call_data['summary'] or "No summary available.")
 
-    with st.expander("🗣️ Speech Transcription"):
+    with st.expander(" Speech Transcription"):
         st.write(call_data['transcription'])
 
-    with st.expander("🚨 Detected Violations & Compliance", expanded=True):
+    with st.expander(" Detected Violations & Compliance", expanded=True):
         try:
             violations = json.loads(call_data['violations'])
         except (TypeError, ValueError):
@@ -592,7 +592,7 @@ def view_call_report():
         else:
             st.success("No compliance violations detected.")
 
-    with st.expander("✍️ Grammar Analysis"):
+    with st.expander(" Grammar Analysis"):
         try:
             grammar = json.loads(call_data['grammar_feedback'])
         except (TypeError, ValueError):
@@ -604,11 +604,11 @@ def view_call_report():
         else:
             st.success("Perfect grammar!")
 
-    with st.expander("💡 Manager Notes"):
+    with st.expander(" Manager Notes"):
         st.markdown(f"**Notes:** {call_data['manager_notes'] or 'No manual notes added yet.'}")
 
     st.download_button(
-        label="📥 Export Report Data (CSV)",
+        label=" Export Report Data (CSV)",
         data=pd.DataFrame([call_data]).to_csv(index=False),
         file_name=f"Report_{call_id}.csv",
         mime="text/csv",
@@ -624,14 +624,14 @@ def view_auditor():
     with st.form("audit_form"):
         c1, c2, c3 = st.columns(3)
         with c1:
-            agent_id = st.text_input("🆔 Employee ID", placeholder="EMP001")
+            agent_id = st.text_input(" Employee ID", placeholder="EMP001")
         with c2:
-            agent_name = st.text_input("👨‍💼 Agent Name", placeholder="John Doe")
+            agent_name = st.text_input(" Agent Name", placeholder="John Doe")
         with c3:
-            agent_team = st.text_input("🏢 Team leader", placeholder="Tech Support")
+            agent_team = st.text_input(" Team leader", placeholder="Tech Support")
 
         uploaded_files = st.file_uploader(
-            "📂 Upload Audio Records (multiple allowed)",
+            " Upload Audio Records (multiple allowed)",
             type=["mp3", "wav", "m4a"],
             accept_multiple_files=True,
         )
@@ -639,9 +639,9 @@ def view_auditor():
 
     if submit_btn:
         if not agent_id or not agent_name or not uploaded_files:
-            st.error("⚠️ Please fill in all agent details and upload at least one audio file.")
+            st.error(" Please fill in all agent details and upload at least one audio file.")
         elif not SERVER_GROQ_KEY:
-            st.error("⚠️ No API key configured. Add API_KEY.")
+            st.error(" No API key configured. Add API_KEY.")
         else:
             client = OpenAI(api_key=SERVER_GROQ_KEY, base_url="https://api.groq.com/openai/v1")
             banned_rules = load_banned_rules()
@@ -742,24 +742,24 @@ def view_auditor():
                     new_calls.append((call_uid, uploaded_file.name, final_score, call_status))
                     success_count += 1
                     status_area.markdown(
-                        f"<div class='audit-row-ok'>✅ <b>{uploaded_file.name}</b> — {final_score}/10 "
+                        f"<div class='audit-row-ok'> <b>{uploaded_file.name}</b> — {final_score}/10 "
                         f"{status_badge(call_status)}</div>",
                         unsafe_allow_html=True,
                     )
                 except Exception as e:
                     status_area.markdown(
-                        f"<div class='audit-row-err'>❌ <b>{uploaded_file.name}</b> — {e}</div>",
+                        f"<div class='audit-row-err'> <b>{uploaded_file.name}</b> — {e}</div>",
                         unsafe_allow_html=True,
                     )
 
                 progress_bar.progress((index + 1) / total_files)
 
-            st.success(f"🎉 Audited {success_count} of {total_files} call(s) for {agent_name}.")
+            st.success(f" Audited {success_count} of {total_files} call(s) for {agent_name}.")
             if new_calls:
                 st.session_state.last_audited_calls = new_calls
 
     if st.session_state.get("last_audited_calls"):
-        st.markdown("#### ✅ Just Audited")
+        st.markdown("#### Just Audited")
         for call_uid, fname, score, call_status in st.session_state.last_audited_calls:
             rc = st.columns([3, 1.2, 1.3, 1.5])
             rc[0].write(fname)
@@ -775,7 +775,7 @@ def view_auditor():
 # 11. VIEW: SETTINGS
 # ==========================================
 def view_settings():
-    st.title("⚙️ Settings")
+    st.title(" Settings")
     st.caption("Configure the words and phrases the AI auditor checks for.")
 
     rules = load_banned_rules()
