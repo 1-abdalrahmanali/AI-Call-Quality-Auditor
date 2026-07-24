@@ -1,0 +1,30 @@
+# Secrets
+.streamlit/secrets.toml
+.env
+
+# Database
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual Environment
+.venv/
+venv/
+
+# Temporary Audio
+temp_*.mp3
+temp_*.wav
+temp_*.m4a
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

@@ -277,7 +277,7 @@ with st.sidebar:
 # 6. VIEW: DASHBOARD
 # ==========================================
 def view_dashboard():
-    st.title("🛡️ QA Operations")
+    st.title(" QA Operations")
     st.caption("Find an agent, open their calls, and review AI-generated reports.")
 
     st.markdown("##### 🔎 Search")
