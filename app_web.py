@@ -1,18 +1,3 @@
-"""
-QA Operations Console
-----------------------------------------------------------------------
-Workflow-first dashboard for QA managers and team leads: find an agent,
-open their calls, review AI-generated audit reports. No analytics/chart
-widgets by design — the job of this page is navigation, not reporting.
-
-Routing note: Streamlit has no built-in path-based routing (no real
-/agent/{id} URLs). This app approximates it with query-string state
-(?view=AgentDetails&agent_id=...), which is bookmarkable/shareable in
-a browser, but will show as localhost:8501/?view=... rather than a
-clean /agent/... path. True path routing would need Streamlit's
-multipage-app file structure or a third-party router package.
-"""
-
 import json
 import os
 import sqlite3
@@ -254,7 +239,7 @@ with st.sidebar:
     nav_items = [
         ("Dashboard", "📊 Dashboard"),
         ("Agents", "👥 Agents"),
-        ("Auditor", "🎙️ Run AI Audit"),
+        ("Auditor", "Audios"),
         ("Settings", "⚙️ Settings"),
     ]
     active_key = active_nav_key()
@@ -265,20 +250,23 @@ with st.sidebar:
             navigate_to(view_key)
             st.rerun()
 
-    st.divider()
     if st.button("🚪 Logout", use_container_width=True):
         for key in ("current_view", "selected_agent", "selected_call", "previous_view", "last_audited_calls"):
             st.session_state.pop(key, None)
         sync_query_params({})
         st.rerun()
 
-
+    
+    st.divider()    
+    st.markdown("Made by: Abdalruhman Ali")
+    st.caption("All Rights Reserved")
+    
 # ==========================================
 # 6. VIEW: DASHBOARD
 # ==========================================
 def view_dashboard():
     st.title(" QA Operations")
-    st.caption("Find an agent, open their calls, and review AI-generated reports.")
+    st.caption("Find an agent, open their calls, and review the reports.")
 
     st.markdown("##### 🔎 Search")
     search_query = st.text_input(
@@ -631,8 +619,7 @@ def view_call_report():
 # 10. VIEW: RUN AI AUDIT (multi-file)
 # ==========================================
 def view_auditor():
-    st.title("🎙️ Run AI Audit")
-    st.markdown("Upload one or more customer service recordings for immediate AI evaluation.")
+    st.title("Analyze Call")
 
     with st.form("audit_form"):
         c1, c2, c3 = st.columns(3)
@@ -641,21 +628,20 @@ def view_auditor():
         with c2:
             agent_name = st.text_input("👨‍💼 Agent Name", placeholder="John Doe")
         with c3:
-            agent_team = st.text_input("🏢 Team/Department", placeholder="Tech Support")
+            agent_team = st.text_input("🏢 Team leader", placeholder="Tech Support")
 
         uploaded_files = st.file_uploader(
             "📂 Upload Audio Records (multiple allowed)",
             type=["mp3", "wav", "m4a"],
             accept_multiple_files=True,
         )
-        submit_btn = st.form_submit_button("🚀 Run AI Audit", type="primary")
+        submit_btn = st.form_submit_button(" Run ", type="primary")
 
     if submit_btn:
         if not agent_id or not agent_name or not uploaded_files:
             st.error("⚠️ Please fill in all agent details and upload at least one audio file.")
         elif not SERVER_GROQ_KEY:
-            st.error("⚠️ No Groq API key configured. Add GROQ_API_KEY in Settings → Secrets (Streamlit Cloud) "
-                      "or in .streamlit/secrets.toml locally.")
+            st.error("⚠️ No API key configured. Add API_KEY.")
         else:
             client = OpenAI(api_key=SERVER_GROQ_KEY, base_url="https://api.groq.com/openai/v1")
             banned_rules = load_banned_rules()
@@ -794,17 +780,17 @@ def view_settings():
 
     rules = load_banned_rules()
 
-    st.markdown("#### 🚫 Banned Phrases")
+    st.markdown("####  Banned Phrases")
     st.caption("Exact phrases agents should never say (e.g. dismissive language). One per line.")
     banned_en = st.text_area("English banned phrases", value="\n".join(rules.get("english_banned", [])), height=140)
     banned_es = st.text_area("Spanish banned phrases", value="\n".join(rules.get("spanish_banned", [])), height=100)
 
-    st.markdown("#### 🤬 Offensive Words")
+    st.markdown("####  Offensive Words")
     st.caption("Individual words that should always be flagged as profanity. One per line.")
     off_en = st.text_area("English offensive words", value="\n".join(rules.get("english_offensive", [])), height=100)
     off_es = st.text_area("Spanish offensive words", value="\n".join(rules.get("spanish_offensive", [])), height=100)
 
-    if st.button("💾 Save Changes", type="primary"):
+    if st.button(" Save Changes", type="primary"):
         save_banned_rules({
             "english_banned": [w.strip() for w in banned_en.splitlines() if w.strip()],
             "spanish_banned": [w.strip() for w in banned_es.splitlines() if w.strip()],
