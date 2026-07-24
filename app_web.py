@@ -232,8 +232,8 @@ def active_nav_key():
 # 5. SIDEBAR NAVIGATION
 # ==========================================
 with st.sidebar:
-    st.markdown("### 🛡️ QA Operations")
-    st.caption("Enterprise Console")
+    st.markdown("### Call guard")
+    st.caption("Quality Assurance Platform")
     st.divider()
 
     nav_items = [
