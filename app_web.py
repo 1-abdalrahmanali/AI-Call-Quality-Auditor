@@ -188,11 +188,9 @@ def id_chip(value):
 # ==========================================
 
 def view_login():
-    # 1. تقسيم الشاشة إلى 3 أعمدة لتوسيط المحتوى في العمود الأوسط
     _, col_center, _ = st.columns([1, 1.2, 1])
 
     with col_center:
-        # 2. إضافة إطار أنيق (Card) يجمع أجزاء تسجيل الدخول
         with st.container(border=True):
             st.markdown(
                 "<h2 style='text-align: center; margin-bottom: 0;'>"
@@ -200,7 +198,7 @@ def view_login():
                 unsafe_allow_html=True,
             )
             st.caption("Please enter the password to access the system.")
-            st.write("")  # مسافة جمالية صغيرة
+            st.write("")  
 
             with st.form("simple_login_form"):
                 password = st.text_input(
@@ -209,7 +207,7 @@ def view_login():
                     placeholder="Enter your password",
                 )
 
-                # جعل الزر بعرض الكارت بالكامل
+
                 submit_btn = st.form_submit_button(
                     "Sign In", type="primary", use_container_width=True
                 )
@@ -484,7 +482,7 @@ def view_dashboard():
 # 7. VIEW: AGENTS
 # ==========================================
 def view_agents():
-    st.title("👥 Agents")
+    st.title(" Agents")
     st.caption("Find an agent, then open their calls.")
 
     thirty_days_ago = (datetime.now().date() - timedelta(days=30)).isoformat()
@@ -499,7 +497,7 @@ def view_agents():
     """, (thirty_days_ago,))
 
     if not df_top.empty:
-        st.markdown("##### 🏆 Top Performers (Last 30 Days)")
+        st.markdown("#####  Top Performers (Last 30 Days)")
         tp_cols = st.columns(len(df_top))
         for col, (_, row) in zip(tp_cols, df_top.iterrows()):
             call_word = "call" if row['call_count'] == 1 else "calls"
@@ -585,7 +583,7 @@ def view_agent_details():
         navigate_to("Agents")
         st.rerun()
 
-    st.title(f"👤 {agent_info['name']}")
+    st.title(f" {agent_info['name']}")
     st.markdown(id_chip(agent_info['id']), unsafe_allow_html=True)
     st.caption(f"Team: {agent_info['team'] or '—'}  ·  {agent_info['email'] or 'No email on file'}")
 
