@@ -46,7 +46,14 @@ def init_db():
     c.execute("""CREATE TABLE IF NOT EXISTS reports (
                     call_id TEXT PRIMARY KEY, language TEXT, summary TEXT,
                     violations TEXT, grammar_feedback TEXT, manager_notes TEXT,
+                    recommended_coaching TEXT,
                     FOREIGN KEY(call_id) REFERENCES calls(id))""")
+
+    # Migration for databases created before recommended_coaching existed.
+    existing_cols = [row[1] for row in c.execute("PRAGMA table_info(reports)").fetchall()]
+    if "recommended_coaching" not in existing_cols:
+        c.execute("ALTER TABLE reports ADD COLUMN recommended_coaching TEXT")
+
     conn.commit()
     conn.close()
 
@@ -137,6 +144,14 @@ st.markdown("""
         margin-bottom: 8px;
     }
 
+    .top-performer-card {
+        background: rgba(212, 162, 76, 0.06);
+        border: 1px solid rgba(212, 162, 76, 0.35);
+        border-left: 3px solid #D4A24C;
+        border-radius: 8px;
+        padding: 12px 14px;
+    }
+
     .col-header { color: #8A94A6; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; }
     .row-divider { margin: 4px 0 10px; border: none; border-top: 1px solid #1D232E; }
 
@@ -168,10 +183,67 @@ def status_badge(status):
 def id_chip(value):
     return f"<span class='id-chip'>{value}</span>"
 
+# ==========================================
+#  Login
+# ==========================================
 
+def view_login():
+    # 1. تقسيم الشاشة إلى 3 أعمدة لتوسيط المحتوى في العمود الأوسط
+    _, col_center, _ = st.columns([1, 1.2, 1])
+
+    with col_center:
+        # 2. إضافة إطار أنيق (Card) يجمع أجزاء تسجيل الدخول
+        with st.container(border=True):
+            st.markdown(
+                "<h2 style='text-align: center; margin-bottom: 0;'>"
+                " callguard</h2>",
+                unsafe_allow_html=True,
+            )
+            st.caption("Please enter the password to access the system.")
+            st.write("")  # مسافة جمالية صغيرة
+
+            with st.form("simple_login_form"):
+                password = st.text_input(
+                    "Password",
+                    type="password",
+                    placeholder="Enter your password",
+                )
+
+                # جعل الزر بعرض الكارت بالكامل
+                submit_btn = st.form_submit_button(
+                    "Sign In", type="primary", use_container_width=True
+                )
+
+                if submit_btn:
+                    try:
+                        correct_password = st.secrets["APP_PASSWORD"]
+
+                        if password == correct_password:
+                            st.session_state.authenticated = True
+                            st.success("Welcome back!")
+                            st.rerun()
+                        else:
+                            st.error(
+                                "Authentication failed. Please check your"
+                                " password."
+                            )
+                    except Exception:
+                        st.error(
+                            " Secrets file missing! Please create"
+                        )
+                
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.get("authenticated", False):
+    view_login()
+    st.stop()  
 # ==========================================
 # 4. ROUTER / STATE MANAGEMENT
 # ==========================================
+    
+
+
 def sync_query_params(params):
     """Best-effort URL sync. Safe no-op on Streamlit versions without st.query_params."""
     try:
@@ -251,10 +323,11 @@ with st.sidebar:
             st.rerun()
 
     if st.button(" Logout", use_container_width=True):
-        for key in ("current_view", "selected_agent", "selected_call", "previous_view", "last_audited_calls"):
-            st.session_state.pop(key, None)
-        sync_query_params({})
-        st.rerun()
+     st.session_state.authenticated = False
+     for key in ("current_view", "selected_agent", "selected_call", "previous_view", "last_audited_calls"):
+        st.session_state.pop(key, None)
+     sync_query_params({})
+     st.rerun()
 
     
     st.divider()    
@@ -414,6 +487,32 @@ def view_agents():
     st.title("👥 Agents")
     st.caption("Find an agent, then open their calls.")
 
+    thirty_days_ago = (datetime.now().date() - timedelta(days=30)).isoformat()
+    df_top = run_query("""
+        SELECT a.id, a.name, a.team, AVG(c.qa_score) as avg_score, COUNT(c.id) as call_count
+        FROM agents a
+        JOIN calls c ON a.id = c.agent_id
+        WHERE substr(c.date, 1, 10) >= ?
+        GROUP BY a.id
+        ORDER BY avg_score DESC
+        LIMIT 5
+    """, (thirty_days_ago,))
+
+    if not df_top.empty:
+        st.markdown("##### 🏆 Top Performers (Last 30 Days)")
+        tp_cols = st.columns(len(df_top))
+        for col, (_, row) in zip(tp_cols, df_top.iterrows()):
+            call_word = "call" if row['call_count'] == 1 else "calls"
+            col.markdown(f"""
+                <div class="top-performer-card">
+                    <div style="font-weight:600;color:#EAEDF3;font-size:13px;">{row['name']}</div>
+                    <div style="color:#8A94A6;font-size:11px;margin-top:2px;">{row['team'] or '—'}</div>
+                    <div style="color:#D4A24C;font-weight:700;font-size:18px;margin-top:6px;">{row['avg_score']:.2f}/10</div>
+                    <div style="color:#8A94A6;font-size:11px;">{int(row['call_count'])} {call_word}</div>
+                </div>
+            """, unsafe_allow_html=True)
+        st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+
     search = st.text_input("Search agents", placeholder="Search by agent name or employee ID",
                             label_visibility="collapsed")
 
@@ -490,6 +589,21 @@ def view_agent_details():
     st.markdown(id_chip(agent_info['id']), unsafe_allow_html=True)
     st.caption(f"Team: {agent_info['team'] or '—'}  ·  {agent_info['email'] or 'No email on file'}")
 
+    thirty_days_ago = (datetime.now().date() - timedelta(days=30)).isoformat()
+    recent_stats = run_query(
+        "SELECT AVG(qa_score) as avg_score, COUNT(*) as call_count FROM calls "
+        "WHERE agent_id = ? AND substr(date, 1, 10) >= ?",
+        (agent_id, thirty_days_ago),
+    ).iloc[0]
+
+    st.markdown("#### Score History")
+    sh1, sh2 = st.columns(2)
+    if recent_stats['call_count'] and recent_stats['call_count'] > 0:
+        sh1.metric("Avg Score (Last 30 Days)", f"{recent_stats['avg_score']:.2f}/10")
+    else:
+        sh1.metric("Avg Score (Last 30 Days)", "—")
+    sh2.metric("Calls (Last 30 Days)", int(recent_stats['call_count'] or 0))
+
     st.markdown("#### Call History")
     df_calls = run_query(
         "SELECT id as call_id, date, duration, qa_score, status FROM calls WHERE agent_id = ? ORDER BY date DESC",
@@ -536,7 +650,7 @@ def view_call_report():
 
     df = run_query("""
         SELECT c.*, a.name as agent_name, a.id as employee_id, a.team,
-               r.language, r.summary, r.violations, r.grammar_feedback, r.manager_notes
+               r.language, r.summary, r.violations, r.grammar_feedback, r.manager_notes, r.recommended_coaching
         FROM calls c
         JOIN agents a ON c.agent_id = a.id
         JOIN reports r ON c.id = r.call_id
@@ -603,6 +717,9 @@ def view_call_report():
                 st.caption(f"Reason: {err.get('reason')}")
         else:
             st.success("Perfect grammar!")
+
+    with st.expander(" Recommended Coaching", expanded=True):
+        st.write(call_data['recommended_coaching'] or "No coaching notes generated for this call.")
 
     with st.expander(" Manager Notes"):
         st.markdown(f"**Notes:** {call_data['manager_notes'] or 'No manual notes added yet.'}")
@@ -692,6 +809,7 @@ def view_auditor():
                        - Only flag undeniable grammar, tense, or syntax structural breakages (e.g., "He go" instead of "He goes").
                        - If there are no true grammar errors, return an empty list [].
                     5. Write a short executive audit summary paragraph.
+                    6. Write 1-3 short, actionable coaching recommendations for this agent's manager, based specifically on what was (or wasn't) found above. If the call was clean, briefly note what the agent did well instead of inventing issues.
 
                     Return ONLY a valid JSON object matching this structure precisely:
                     {{
@@ -702,7 +820,8 @@ def view_auditor():
                       "grammar_errors": [
                         {{"error": "string", "correction": "string", "reason": "string"}}
                       ],
-                      "audit_summary": "string summary paragraph"
+                      "audit_summary": "string summary paragraph",
+                      "recommended_coaching": "string with 1-3 short coaching recommendations"
                     }}
                     """
 
@@ -733,10 +852,11 @@ def view_auditor():
                          final_score, 0, call_status, profanity_flag),
                     )
                     execute_query(
-                        """INSERT INTO reports (call_id, language, summary, violations, grammar_feedback, manager_notes)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        """INSERT INTO reports (call_id, language, summary, violations, grammar_feedback, manager_notes, recommended_coaching)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
                         (call_uid, result.get("language"), result.get("audit_summary"),
-                         json.dumps(all_violations), json.dumps(grammar_errs), ""),
+                         json.dumps(all_violations), json.dumps(grammar_errs), "",
+                         result.get("recommended_coaching")),
                     )
 
                     new_calls.append((call_uid, uploaded_file.name, final_score, call_status))
