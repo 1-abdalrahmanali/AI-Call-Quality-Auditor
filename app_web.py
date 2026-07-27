@@ -47,12 +47,17 @@ def init_db():
                     call_id TEXT PRIMARY KEY, language TEXT, summary TEXT,
                     violations TEXT, grammar_feedback TEXT, manager_notes TEXT,
                     recommended_coaching TEXT,
+                    sentiment_start TEXT, sentiment_end TEXT,
                     FOREIGN KEY(call_id) REFERENCES calls(id))""")
 
     # Migration for databases created before recommended_coaching existed.
     existing_cols = [row[1] for row in c.execute("PRAGMA table_info(reports)").fetchall()]
     if "recommended_coaching" not in existing_cols:
         c.execute("ALTER TABLE reports ADD COLUMN recommended_coaching TEXT")
+    if "sentiment_start" not in existing_cols:
+        c.execute("ALTER TABLE reports ADD COLUMN sentiment_start TEXT")
+    if "sentiment_end" not in existing_cols:
+        c.execute("ALTER TABLE reports ADD COLUMN sentiment_end TEXT")
 
     conn.commit()
     conn.close()
@@ -134,6 +139,7 @@ st.markdown("""
     .badge-passed   { background: rgba(63, 182, 139, 0.15); color: #3FB68B; border: 1px solid rgba(63,182,139,0.35); }
     .badge-warning  { background: rgba(224, 167, 62, 0.15); color: #E0A73E; border: 1px solid rgba(224,167,62,0.35); }
     .badge-critical { background: rgba(229, 72, 77, 0.15);  color: #E5484D; border: 1px solid rgba(229,72,77,0.35); }
+    .badge-review   { background: rgba(124, 147, 255, 0.15); color: #7C93FF; border: 1px solid rgba(124,147,255,0.35); }
 
     .critical-alert-card {
         background: rgba(229, 72, 77, 0.06);
@@ -175,6 +181,7 @@ def status_badge(status):
         "Passed": ("badge-passed", "🟢"),
         "Warning": ("badge-warning", "🟡"),
         "Critical": ("badge-critical", "🔴"),
+        "In Review": ("badge-review", "🔵"),
     }
     cls, emoji = styles.get(status, ("badge-warning", "⚪"))
     return f"<span class='status-badge {cls}'>{emoji} {status}</span>"
@@ -183,52 +190,43 @@ def status_badge(status):
 def id_chip(value):
     return f"<span class='id-chip'>{value}</span>"
 
+
+def sentiment_badge(sentiment):
+    styles = {
+        "Positive": ("badge-passed", "🙂"),
+        "Neutral": ("badge-warning", "😐"),
+        "Negative": ("badge-critical", "🙁"),
+    }
+    cls, emoji = styles.get(sentiment, ("badge-warning", "❔"))
+    return f"<span class='status-badge {cls}'>{emoji} {sentiment or 'Unknown'}</span>"
+
 # ==========================================
 #  Login
 # ==========================================
 
 def view_login():
-    _, col_center, _ = st.columns([1, 1.2, 1])
+    st.title("callguard")
+    st.caption("please enter the password")
 
-    with col_center:
-        with st.container(border=True):
-            st.markdown(
-                "<h2 style='text-align: center; margin-bottom: 0;'>"
-                " callguard</h2>",
-                unsafe_allow_html=True,
-            )
-            st.caption("Please enter the password to access the system.")
-            st.write("")  
+    with st.form("simple_login_form"):
+        password = st.text_input(
+            "Password", type="password", placeholder="Enter your password"
+        )
 
-            with st.form("simple_login_form"):
-                password = st.text_input(
-                    "Password",
-                    type="password",
-                    placeholder="Enter your password",
+        submit_btn = st.form_submit_button("Sign In", type="primary")
+
+        if submit_btn:
+            correct_password = st.secrets["APP_PASSWORD"]
+
+            if password == correct_password:
+                st.session_state.authenticated = True
+                st.success("Welcome back!")
+                st.rerun()
+            else:
+                st.error(
+                    "Authentication failed. Please check your password and try"
+                    " again."
                 )
-
-
-                submit_btn = st.form_submit_button(
-                    "Sign In", type="primary", use_container_width=True
-                )
-
-                if submit_btn:
-                    try:
-                        correct_password = st.secrets["APP_PASSWORD"]
-
-                        if password == correct_password:
-                            st.session_state.authenticated = True
-                            st.success("Welcome back!")
-                            st.rerun()
-                        else:
-                            st.error(
-                                "Authentication failed. Please check your"
-                                " password."
-                            )
-                    except Exception:
-                        st.error(
-                            " Secrets file missing! Please create"
-                        )
                 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -482,7 +480,7 @@ def view_dashboard():
 # 7. VIEW: AGENTS
 # ==========================================
 def view_agents():
-    st.title(" Agents")
+    st.title("👥 Agents")
     st.caption("Find an agent, then open their calls.")
 
     thirty_days_ago = (datetime.now().date() - timedelta(days=30)).isoformat()
@@ -497,7 +495,7 @@ def view_agents():
     """, (thirty_days_ago,))
 
     if not df_top.empty:
-        st.markdown("#####  Top Performers (Last 30 Days)")
+        st.markdown("##### 🏆 Top Performers (Last 30 Days)")
         tp_cols = st.columns(len(df_top))
         for col, (_, row) in zip(tp_cols, df_top.iterrows()):
             call_word = "call" if row['call_count'] == 1 else "calls"
@@ -583,7 +581,7 @@ def view_agent_details():
         navigate_to("Agents")
         st.rerun()
 
-    st.title(f" {agent_info['name']}")
+    st.title(f"👤 {agent_info['name']}")
     st.markdown(id_chip(agent_info['id']), unsafe_allow_html=True)
     st.caption(f"Team: {agent_info['team'] or '—'}  ·  {agent_info['email'] or 'No email on file'}")
 
@@ -648,7 +646,8 @@ def view_call_report():
 
     df = run_query("""
         SELECT c.*, a.name as agent_name, a.id as employee_id, a.team,
-               r.language, r.summary, r.violations, r.grammar_feedback, r.manager_notes, r.recommended_coaching
+               r.language, r.summary, r.violations, r.grammar_feedback, r.manager_notes,
+               r.recommended_coaching, r.sentiment_start, r.sentiment_end
         FROM calls c
         JOIN agents a ON c.agent_id = a.id
         JOIN reports r ON c.id = r.call_id
@@ -672,14 +671,49 @@ def view_call_report():
     st.markdown(id_chip(call_id), unsafe_allow_html=True)
     st.caption(f"Agent: {call_data['agent_name']} ({call_data['employee_id']})  ·  Audited: {str(call_data['date'])[:16]}")
 
-    hc1, hc2, hc3 = st.columns(3)
+    hc1, hc2, hc3, hc4 = st.columns(4)
     hc1.metric("QA Score", f"{call_data['qa_score']}/10")
     with hc2:
         st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
         st.markdown(status_badge(call_data['status']), unsafe_allow_html=True)
     hc3.metric("Profanity", "Flagged " if call_data['profanity_detected'] else "Clean ")
+    with hc4:
+        st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
+        if call_data['status'] == "In Review":
+            st.caption("🔵 Already flagged for review")
+        else:
+            if st.button("🚩 Flag for Manual Review", use_container_width=True, key=f"flag_{call_id}"):
+                execute_query("UPDATE calls SET status = ? WHERE id = ?", ("In Review", call_id))
+                st.success("Flagged for manual review.")
+                st.rerun()
 
     st.divider()
+
+    sentiment_start = call_data['sentiment_start']
+    sentiment_end = call_data['sentiment_end']
+    if sentiment_start or sentiment_end:
+        st.markdown("##### Customer Sentiment")
+        sc1, sc2, sc3 = st.columns([1, 0.3, 1])
+        sc1.markdown(f"Start of call<br>{sentiment_badge(sentiment_start)}", unsafe_allow_html=True)
+        sc2.markdown("<div style='text-align:center;font-size:20px;margin-top:22px;color:#8A94A6;'>→</div>",
+                     unsafe_allow_html=True)
+        sc3.markdown(f"End of call<br>{sentiment_badge(sentiment_end)}", unsafe_allow_html=True)
+
+        rank = {"Negative": 0, "Neutral": 1, "Positive": 2}
+        if sentiment_start in rank and sentiment_end in rank:
+            start_r, end_r = rank[sentiment_start], rank[sentiment_end]
+            if end_r > start_r:
+                st.caption("📈 Improved during the call.")
+            elif end_r < start_r:
+                st.caption("📉 Declined during the call.")
+            elif sentiment_start == "Negative":
+                st.caption("⚠️ Remained negative — no improvement.")
+            elif sentiment_start == "Positive":
+                st.caption("Stayed positive throughout.")
+            else:
+                st.caption("Stayed neutral throughout.")
+
+        st.divider()
 
     with st.expander(" Audio Record Player", expanded=True):
         if call_data['audio_file'] and os.path.exists(str(call_data['audio_file'])):
@@ -719,8 +753,16 @@ def view_call_report():
     with st.expander(" Recommended Coaching", expanded=True):
         st.write(call_data['recommended_coaching'] or "No coaching notes generated for this call.")
 
-    with st.expander(" Manager Notes"):
-        st.markdown(f"**Notes:** {call_data['manager_notes'] or 'No manual notes added yet.'}")
+    with st.expander(" Manager Notes", expanded=True):
+        with st.form(f"notes_form_{call_id}"):
+            notes_input = st.text_area(
+                "Notes", value=call_data['manager_notes'] or "", height=100,
+                label_visibility="collapsed", placeholder="Add manager notes for this call...",
+            )
+            if st.form_submit_button("💾 Save Notes"):
+                execute_query("UPDATE reports SET manager_notes = ? WHERE call_id = ?", (notes_input, call_id))
+                st.success("Notes saved.")
+                st.rerun()
 
     st.download_button(
         label=" Export Report Data (CSV)",
@@ -788,7 +830,12 @@ def view_auditor():
                     transcript_text = transcript_response.text
 
                     prompt = f"""
-                    You are a strict Senior Quality Assurance Auditor. Your job is NOT to coach on politeness or style, but to find STRICT GRAMMATICAL ERRORS ONLY.
+                    You are a strict Senior Quality Assurance Auditor. Your job is NOT to coach on politeness or style, but to find STRICT GRAMMATICAL ERRORS ONLY, and verify structural requirements.
+
+                    IMPORTANT:
+                    Evaluate ONLY the AGENT.
+                    Ignore every sentence spoken by the CUSTOMER.
+                    Customer mistakes, offensive language, or profanity must NEVER reduce the QA score or trigger any flags.
 
                     Transcript: "{transcript_text}"
 
@@ -800,24 +847,34 @@ def view_auditor():
 
                     Tasks to execute:
                     1. Detect primary spoken language (English or Spanish).
-                    2. Check if the agent used ANY exact phrase from the Banned lists above. List them in `banned_words_found`. Set `has_profanity` to true if offensive words are found.
-                    3. Check if the agent used ANY exact word from the Offensive lists above. List them in `offensive_words_found`.
-                    4. Check for GRAMMAR ERRORS ONLY.
-                       - STRICT RULE: Do NOT flag sentences just because they lack politeness, or because you want a "better phrasing" (e.g., "Sorry for bothering" or "When did you leave?" are grammatically correct and MUST NOT be flagged).
-                       - Only flag undeniable grammar, tense, or syntax structural breakages (e.g., "He go" instead of "He goes").
-                       - If there are no true grammar errors, return an empty list [].
-                    5. Write a short executive audit summary paragraph.
-                    6. Write 1-3 short, actionable coaching recommendations for this agent's manager, based specifically on what was (or wasn't) found above. If the call was clean, briefly note what the agent did well instead of inventing issues.
+                    2. Check if the AGENT used ANY exact phrase from the Banned lists above. List them in `banned_words_found`. Set `has_profanity` to true ONLY if offensive words are spoken by the AGENT.
+                    3. Check if the AGENT used ANY exact word from the Offensive lists above. List them in `offensive_words_found`.
+                    4. Check for GRAMMAR ERRORS ONLY in the AGENT's speech.
+                       - STRICT RULE: Do NOT flag sentences just because they lack politeness, or because you want a "better phrasing".
+                       - Only flag undeniable grammar, tense, or syntax structural breakages.
+                       - If there are no true grammar errors from the agent, return an empty list [].
+                    5. Check if the AGENT made a formal professional greeting at the very beginning of the call.
+                       A formal greeting MUST include ALL of the following:
+                       - Greeting
+                       - Agent name
+                       - Company introduction
+                       If ANY required element is missing, set `formal_greeting_made` to false.
+                    6. Rate the CUSTOMER's sentiment (not the agent's) at the very beginning of the call and again at the very end of the call. Each must be exactly one of "Positive", "Neutral", or "Negative" — this is used to see whether the agent improved or de-escalated the interaction.
+                    7. Write a short executive audit summary paragraph.
+                    8. Write 1-3 short, actionable coaching recommendations for this agent's manager based ONLY on the agent's performance.
 
                     Return ONLY a valid JSON object matching this structure precisely:
                     {{
                       "language": "English/Spanish",
                       "has_profanity": true/false,
+                      "formal_greeting_made": true/false,
                       "offensive_words_found": [],
                       "banned_words_found": [],
                       "grammar_errors": [
                         {{"error": "string", "correction": "string", "reason": "string"}}
                       ],
+                      "sentiment_start": "Positive/Neutral/Negative",
+                      "sentiment_end": "Positive/Neutral/Negative",
                       "audit_summary": "string summary paragraph",
                       "recommended_coaching": "string with 1-3 short coaching recommendations"
                     }}
@@ -828,33 +885,52 @@ def view_auditor():
                         response_format={"type": "json_object"},
                         messages=[{"role": "user", "content": prompt}],
                     )
-                    result = json.loads(response.choices[0].message.content)
 
-                    all_violations = result.get("offensive_words_found", []) + result.get("banned_words_found", [])
+                    try:
+                        result = json.loads(response.choices[0].message.content)
+                    except json.JSONDecodeError:
+                        status_area.markdown(
+                            f"<div class='audit-row-err'> <b>{uploaded_file.name}</b> — "
+                            f"couldn't parse the AI's response. Skipping.</div>",
+                            unsafe_allow_html=True,
+                        )
+                        continue
+
                     grammar_errs = result.get("grammar_errors", [])
+                    banned_words = result.get("banned_words_found", [])
+                    offensive_words = result.get("offensive_words_found", [])
+                    # Default to True (no penalty) if the model omits the field, so a
+                    # missing key never silently costs the agent a point.
+                    formal_greeting_made = result.get("formal_greeting_made", True)
 
-                    base_score = 10.0
-                    base_score -= (len(result.get("offensive_words_found", [])) * 2.0)
-                    base_score -= (len(result.get("banned_words_found", [])) * 1.0)
-                    base_score -= min(len(grammar_errs) * 0.25, 2.0)
-                    final_score = round(max(0.0, min(10.0, base_score)), 2)
+                    grammar_penalty = min(len(grammar_errs) * 0.15, 2.0)
+                    banned_penalty = (len(offensive_words) * 2.0) + (len(banned_words) * 1.0)
+                    greeting_penalty = 0.0 if formal_greeting_made else 1.0
 
-                    call_status = "Passed" if final_score >= 8 else ("Warning" if final_score >= 5 else "Critical")
-                    profanity_flag = 1 if result.get("has_profanity") else 0
+                    grammar_score = round(max(0.0, 10.0 - grammar_penalty), 1)
+                    final_score = round(max(0.0, 10.0 - grammar_penalty - banned_penalty - greeting_penalty), 1)
+
+                    call_status = "Passed" if final_score >= 8.0 else ("Warning" if final_score >= 5.0 else "Critical")
+                    profanity_flag = 1 if (result.get("has_profanity") or offensive_words) else 0
+
+                    all_violations = banned_words + offensive_words
+                    if not formal_greeting_made:
+                        all_violations.append("Missing formal greeting at the beginning of the call.")
 
                     execute_query(
                         """INSERT INTO calls (id, agent_id, date, duration, audio_file, transcription,
                                                qa_score, grammar_score, status, profanity_detected)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (call_uid, agent_id, str(datetime.now()), "N/A", audio_path, transcript_text,
-                         final_score, 0, call_status, profanity_flag),
+                         final_score, grammar_score, call_status, profanity_flag),
                     )
                     execute_query(
-                        """INSERT INTO reports (call_id, language, summary, violations, grammar_feedback, manager_notes, recommended_coaching)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        """INSERT INTO reports (call_id, language, summary, violations, grammar_feedback, manager_notes, recommended_coaching, sentiment_start, sentiment_end)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (call_uid, result.get("language"), result.get("audit_summary"),
                          json.dumps(all_violations), json.dumps(grammar_errs), "",
-                         result.get("recommended_coaching")),
+                         result.get("recommended_coaching"),
+                         result.get("sentiment_start"), result.get("sentiment_end")),
                     )
 
                     new_calls.append((call_uid, uploaded_file.name, final_score, call_status))
@@ -869,8 +945,8 @@ def view_auditor():
                         f"<div class='audit-row-err'> <b>{uploaded_file.name}</b> — {e}</div>",
                         unsafe_allow_html=True,
                     )
-
-                progress_bar.progress((index + 1) / total_files)
+                finally:
+                    progress_bar.progress((index + 1) / total_files)
 
             st.success(f" Audited {success_count} of {total_files} call(s) for {agent_name}.")
             if new_calls:
