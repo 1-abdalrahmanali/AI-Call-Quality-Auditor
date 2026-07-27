@@ -682,7 +682,7 @@ def view_call_report():
         if call_data['status'] == "In Review":
             st.caption("🔵 Already flagged for review")
         else:
-            if st.button("🚩 Flag for Manual Review", use_container_width=True, key=f"flag_{call_id}"):
+            if st.button(" Flag for Manual Review", use_container_width=True, key=f"flag_{call_id}"):
                 execute_query("UPDATE calls SET status = ? WHERE id = ?", ("In Review", call_id))
                 st.success("Flagged for manual review.")
                 st.rerun()
@@ -833,9 +833,10 @@ def view_auditor():
                     You are a strict Senior Quality Assurance Auditor. Your job is NOT to coach on politeness or style, but to find STRICT GRAMMATICAL ERRORS ONLY, and verify structural requirements.
 
                     IMPORTANT:
-                    Evaluate ONLY the AGENT.
-                    Ignore every sentence spoken by the CUSTOMER.
-                    Customer mistakes, offensive language, or profanity must NEVER reduce the QA score or trigger any flags.
+                    This transcript has NO speaker labels — the agent's and customer's words are not
+                    reliably distinguishable from raw transcription alone. Do not try to guess which
+                    sentences belong to which speaker. Evaluate the full transcript against the checks
+                    below as-is.
 
                     Transcript: "{transcript_text}"
 
@@ -847,21 +848,21 @@ def view_auditor():
 
                     Tasks to execute:
                     1. Detect primary spoken language (English or Spanish).
-                    2. Check if the AGENT used ANY exact phrase from the Banned lists above. List them in `banned_words_found`. Set `has_profanity` to true ONLY if offensive words are spoken by the AGENT.
-                    3. Check if the AGENT used ANY exact word from the Offensive lists above. List them in `offensive_words_found`.
-                    4. Check for GRAMMAR ERRORS ONLY in the AGENT's speech.
+                    2. Check if ANY exact phrase from the Banned lists above appears anywhere in the transcript. List them in `banned_words_found`.
+                    3. Check if ANY exact word from the Offensive lists above appears anywhere in the transcript. List them in `offensive_words_found`. Set `has_profanity` to true if any are found.
+                    4. Check for GRAMMAR ERRORS ONLY in the transcript.
                        - STRICT RULE: Do NOT flag sentences just because they lack politeness, or because you want a "better phrasing".
                        - Only flag undeniable grammar, tense, or syntax structural breakages.
-                       - If there are no true grammar errors from the agent, return an empty list [].
-                    5. Check if the AGENT made a formal professional greeting at the very beginning of the call.
+                       - If there are no true grammar errors, return an empty list [].
+                    5. Check if the call opens with a formal professional greeting.
                        A formal greeting MUST include ALL of the following:
                        - Greeting
                        - Agent name
-                       - Company introduction
+                       - Company introduction is optional
                        If ANY required element is missing, set `formal_greeting_made` to false.
-                    6. Rate the CUSTOMER's sentiment (not the agent's) at the very beginning of the call and again at the very end of the call. Each must be exactly one of "Positive", "Neutral", or "Negative" — this is used to see whether the agent improved or de-escalated the interaction.
+                    6. Rate the CUSTOMER's sentiment at the very beginning of the call and again at the very end of the call. Each must be exactly one of "Positive", "Neutral", or "Negative" — this is used to see whether the agent improved or de-escalated the interaction.
                     7. Write a short executive audit summary paragraph.
-                    8. Write 1-3 short, actionable coaching recommendations for this agent's manager based ONLY on the agent's performance.
+                    8. Write 1-3 short, actionable coaching recommendations for this agent's manager.
 
                     Return ONLY a valid JSON object matching this structure precisely:
                     {{
