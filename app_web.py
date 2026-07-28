@@ -41,7 +41,7 @@ def init_db():
     c.execute("""CREATE TABLE IF NOT EXISTS calls (
                     id TEXT PRIMARY KEY, agent_id TEXT, date TEXT, duration TEXT,
                     audio_file TEXT, transcription TEXT, qa_score REAL, grammar_score REAL,
-                    status TEXT, profanity_detected INTEGER,
+                    status TEXT, profanity_detected INTEGER, manually_adjusted INTEGER DEFAULT 0,
                     FOREIGN KEY(agent_id) REFERENCES agents(id))""")
     c.execute("""CREATE TABLE IF NOT EXISTS reports (
                     call_id TEXT PRIMARY KEY, language TEXT, summary TEXT,
@@ -58,6 +58,10 @@ def init_db():
         c.execute("ALTER TABLE reports ADD COLUMN sentiment_start TEXT")
     if "sentiment_end" not in existing_cols:
         c.execute("ALTER TABLE reports ADD COLUMN sentiment_end TEXT")
+
+    existing_call_cols = [row[1] for row in c.execute("PRAGMA table_info(calls)").fetchall()]
+    if "manually_adjusted" not in existing_call_cols:
+        c.execute("ALTER TABLE calls ADD COLUMN manually_adjusted INTEGER DEFAULT 0")
 
     conn.commit()
     conn.close()
@@ -384,7 +388,7 @@ def view_dashboard():
 
     query = """
         SELECT c.id as call_id, a.name as agent_name, a.id as employee_id,
-               c.date, c.qa_score, c.status
+               c.date, c.duration, c.qa_score, c.status
         FROM calls c JOIN agents a ON c.agent_id = a.id
         WHERE 1=1
     """
@@ -673,6 +677,8 @@ def view_call_report():
 
     hc1, hc2, hc3, hc4 = st.columns(4)
     hc1.metric("QA Score", f"{call_data['qa_score']}/10")
+    if call_data['manually_adjusted']:
+        hc1.caption("✏️ Manually adjusted")
     with hc2:
         st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
         st.markdown(status_badge(call_data['status']), unsafe_allow_html=True)
@@ -682,7 +688,7 @@ def view_call_report():
         if call_data['status'] == "In Review":
             st.caption("🔵 Already flagged for review")
         else:
-            if st.button(" Flag for Manual Review", use_container_width=True, key=f"flag_{call_id}"):
+            if st.button("🚩 Flag for Manual Review", use_container_width=True, key=f"flag_{call_id}"):
                 execute_query("UPDATE calls SET status = ? WHERE id = ?", ("In Review", call_id))
                 st.success("Flagged for manual review.")
                 st.rerun()
@@ -764,18 +770,26 @@ def view_call_report():
                 st.success("Notes saved.")
                 st.rerun()
 
-# export an excel 
-
-    # st.download_button(
-    #     label=" Export Report Data (CSV)",
-    #     data=pd.DataFrame([call_data]).to_csv(index=False),
-    #     file_name=f"Report_{call_id}.csv",
-    #     mime="text/csv",
-    # )
+    with st.expander(" Override Score"):
+        st.caption("Manually correct the AI-computed score. Status updates automatically to match.")
+        with st.form(f"score_form_{call_id}"):
+            new_score = st.number_input(
+                "QA Score", min_value=0.0, max_value=10.0, step=0.1,
+                value=float(call_data['qa_score']),
+            )
+            if st.form_submit_button("💾 Save Score"):
+                new_score = round(new_score, 1)
+                new_status = "Passed" if new_score >= 8.0 else ("Warning" if new_score >= 5.0 else "Critical")
+                execute_query(
+                    "UPDATE calls SET qa_score = ?, status = ?, manually_adjusted = 1 WHERE id = ?",
+                    (new_score, new_status, call_id),
+                )
+                st.success("Score updated.")
+                st.rerun()
 
 
 # ==========================================
-# 10. VIEW: RUN (multi-file)
+# 10. VIEW: RUN AI AUDIT (multi-file)
 # ==========================================
 def view_auditor():
     st.title("Analyze Call")
@@ -783,9 +797,9 @@ def view_auditor():
     with st.form("audit_form"):
         c1, c2, c3 = st.columns(3)
         with c1:
-            agent_name = st.text_input(" Agent Name", placeholder="John Doe")
-        with c2:
             agent_id = st.text_input(" Employee ID", placeholder="EMP001")
+        with c2:
+            agent_name = st.text_input(" Agent Name", placeholder="John Doe")
         with c3:
             agent_team = st.text_input(" Team leader", placeholder="Tech Support")
 
@@ -807,8 +821,8 @@ def view_auditor():
 
             # Register the agent once — not once per file.
             execute_query(
-                "INSERT OR IGNORE INTO agents (id, name, team) VALUES (?, ?, ?, ?)",
-                (agent_id, agent_name, agent_team)
+                "INSERT OR IGNORE INTO agents (id, name, team, email) VALUES (?, ?, ?, ?)",
+                (agent_id, agent_name, agent_team, f"{agent_id}@company.com"),
             )
 
             total_files = len(uploaded_files)
@@ -852,19 +866,24 @@ def view_auditor():
                     1. Detect primary spoken language (English or Spanish).
                     2. Check if ANY exact phrase from the Banned lists above appears anywhere in the transcript. List them in `banned_words_found`.
                     3. Check if ANY exact word from the Offensive lists above appears anywhere in the transcript. List them in `offensive_words_found`. Set `has_profanity` to true if any are found.
-                    4. Check for GRAMMAR ERRORS ONLY in the transcript.
+                    4. Separately, using your own judgment, identify any OTHER genuinely vulgar, profane, or offensive language anywhere in the transcript that is NOT already on the Banned/Offensive lists above. List these in `general_profanity_found`. Do not duplicate anything already captured in `offensive_words_found` or `banned_words_found`. Set `has_profanity` to true if this list is non-empty too.
+                       - Only flag language that is genuinely vulgar, profane, or offensive (swearing, slurs, crude insults). Do NOT flag language that is merely blunt, informal, or impolite.
+                    5. Scan the ENTIRE transcript for any use of the Arabic language — any Arabic word, phrase, or sentence, in any context.
+                       - Do NOT count proper names (people's names, company names, place names) as Arabic, even if they are Arabic in origin — only actual Arabic-language speech counts.
+                       - Set `arabic_detected` to true if any is found, and list the specific Arabic text found in `arabic_words_found`. If none is found, set `arabic_detected` to false and leave `arabic_words_found` empty.
+                    6. Check for GRAMMAR ERRORS ONLY in the transcript.
                        - STRICT RULE: Do NOT flag sentences just because they lack politeness, or because you want a "better phrasing".
                        - Only flag undeniable grammar, tense, or syntax structural breakages.
                        - If there are no true grammar errors, return an empty list [].
-                    5. Check if the call opens with a formal professional greeting.
+                    7. Check if the call opens with a formal professional greeting.
                        A formal greeting MUST include ALL of the following:
                        - Greeting
                        - Agent name
-                       - Company introduction is optional
+                       - Company introduction
                        If ANY required element is missing, set `formal_greeting_made` to false.
-                    6. Rate the CUSTOMER's sentiment at the very beginning of the call and again at the very end of the call. Each must be exactly one of "Positive", "Neutral", or "Negative" — this is used to see whether the agent improved or de-escalated the interaction.
-                    7. Write a short executive audit summary paragraph.
-                    8. Write 1-3 short, actionable coaching recommendations for this agent's manager.
+                    8. Rate the CUSTOMER's sentiment at the very beginning of the call and again at the very end of the call. Each must be exactly one of "Positive", "Neutral", or "Negative" — this is used to see whether the agent improved or de-escalated the interaction.
+                    9. Write a short executive audit summary paragraph.
+                    10. Write 1-3 short, actionable coaching recommendations for this agent's manager.
 
                     Return ONLY a valid JSON object matching this structure precisely:
                     {{
@@ -873,6 +892,9 @@ def view_auditor():
                       "formal_greeting_made": true/false,
                       "offensive_words_found": [],
                       "banned_words_found": [],
+                      "general_profanity_found": [],
+                      "arabic_detected": true/false,
+                      "arabic_words_found": [],
                       "grammar_errors": [
                         {{"error": "string", "correction": "string", "reason": "string"}}
                       ],
@@ -902,23 +924,35 @@ def view_auditor():
                     grammar_errs = result.get("grammar_errors", [])
                     banned_words = result.get("banned_words_found", [])
                     offensive_words = result.get("offensive_words_found", [])
+                    general_profanity = result.get("general_profanity_found", [])
+                    arabic_detected = result.get("arabic_detected", False)
+                    arabic_words_found = result.get("arabic_words_found", [])
                     # Default to True (no penalty) if the model omits the field, so a
                     # missing key never silently costs the agent a point.
                     formal_greeting_made = result.get("formal_greeting_made", True)
 
                     grammar_penalty = min(len(grammar_errs) * 0.15, 2.0)
-                    banned_penalty = (len(offensive_words) * 2.0) + (len(banned_words) * 1.0)
+                    # general_profanity is weighted the same as configured offensive words (-2.0 each) —
+                    # no separate weight was specified, so this matches the existing tier.
+                    offensive_penalty = (len(offensive_words) + len(general_profanity)) * 2.0
+                    banned_penalty = len(banned_words) * 1.0
                     greeting_penalty = 0.0 if formal_greeting_made else 1.0
 
                     grammar_score = round(max(0.0, 10.0 - grammar_penalty), 1)
-                    final_score = round(max(0.0, 10.0 - grammar_penalty - banned_penalty - greeting_penalty), 1)
+                    final_score = round(max(0.0, 10.0 - grammar_penalty - offensive_penalty - banned_penalty - greeting_penalty), 1)
 
                     call_status = "Passed" if final_score >= 8.0 else ("Warning" if final_score >= 5.0 else "Critical")
-                    profanity_flag = 1 if (result.get("has_profanity") or offensive_words) else 0
+                    profanity_flag = 1 if (result.get("has_profanity") or offensive_words or general_profanity) else 0
 
-                    all_violations = banned_words + offensive_words
+                    all_violations = banned_words + offensive_words + general_profanity
                     if not formal_greeting_made:
                         all_violations.append("Missing formal greeting at the beginning of the call.")
+                    if arabic_detected:
+                        # Informational only — doesn't affect qa_score unless you ask for a penalty too.
+                        if arabic_words_found:
+                            all_violations.append(f"Arabic language detected: {', '.join(arabic_words_found)}")
+                        else:
+                            all_violations.append("Arabic language detected during the call.")
 
                     execute_query(
                         """INSERT INTO calls (id, agent_id, date, duration, audio_file, transcription,
@@ -973,7 +1007,7 @@ def view_auditor():
 # ==========================================
 def view_settings():
     st.title(" Settings")
-    st.caption("Configure the words and phrases.")
+    st.caption("Configure the words and phrases the AI auditor checks for.")
 
     rules = load_banned_rules()
 
