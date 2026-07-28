@@ -384,7 +384,7 @@ def view_dashboard():
 
     query = """
         SELECT c.id as call_id, a.name as agent_name, a.id as employee_id,
-               c.date, c.duration, c.qa_score, c.status
+               c.date, c.qa_score, c.status
         FROM calls c JOIN agents a ON c.agent_id = a.id
         WHERE 1=1
     """
@@ -764,16 +764,18 @@ def view_call_report():
                 st.success("Notes saved.")
                 st.rerun()
 
-    st.download_button(
-        label=" Export Report Data (CSV)",
-        data=pd.DataFrame([call_data]).to_csv(index=False),
-        file_name=f"Report_{call_id}.csv",
-        mime="text/csv",
-    )
+# export an excel 
+
+    # st.download_button(
+    #     label=" Export Report Data (CSV)",
+    #     data=pd.DataFrame([call_data]).to_csv(index=False),
+    #     file_name=f"Report_{call_id}.csv",
+    #     mime="text/csv",
+    # )
 
 
 # ==========================================
-# 10. VIEW: RUN AI AUDIT (multi-file)
+# 10. VIEW: RUN (multi-file)
 # ==========================================
 def view_auditor():
     st.title("Analyze Call")
@@ -781,9 +783,9 @@ def view_auditor():
     with st.form("audit_form"):
         c1, c2, c3 = st.columns(3)
         with c1:
-            agent_id = st.text_input(" Employee ID", placeholder="EMP001")
-        with c2:
             agent_name = st.text_input(" Agent Name", placeholder="John Doe")
+        with c2:
+            agent_id = st.text_input(" Employee ID", placeholder="EMP001")
         with c3:
             agent_team = st.text_input(" Team leader", placeholder="Tech Support")
 
@@ -971,7 +973,7 @@ def view_auditor():
 # ==========================================
 def view_settings():
     st.title(" Settings")
-    st.caption("Configure the words and phrases the AI auditor checks for.")
+    st.caption("Configure the words and phrases.")
 
     rules = load_banned_rules()
 
