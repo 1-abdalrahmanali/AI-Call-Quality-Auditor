@@ -806,7 +806,7 @@ def view_auditor():
             # Register the agent once — not once per file.
             execute_query(
                 "INSERT OR IGNORE INTO agents (id, name, team, email) VALUES (?, ?, ?, ?)",
-                (agent_id, agent_name, agent_team, f"{agent_id}@company.com"),
+                (agent_id, agent_name, agent_team,
             )
 
             total_files = len(uploaded_files)
